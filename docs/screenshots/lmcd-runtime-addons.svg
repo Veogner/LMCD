@@ -1,0 +1,69 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg2" x1="120" y1="80" x2="1320" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111827"/>
+      <stop offset="0.58" stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#101826"/>
+    </linearGradient>
+  </defs>
+  <rect width="1440" height="900" rx="32" fill="url(#bg2)"/>
+  <rect x="48" y="48" width="1344" height="804" rx="28" fill="#0B1020" stroke="#1F2937" stroke-width="2"/>
+  <text x="88" y="102" fill="#F8FAFC" font-size="30" font-family="Segoe UI, Arial, sans-serif" font-weight="700">LMCD runtime and add-on flow</text>
+  <text x="88" y="136" fill="#94A3B8" font-size="17" font-family="Segoe UI, Arial, sans-serif">Pick the runtime, lock the supported versions, then install plugins or mods from the browser.</text>
+
+  <rect x="88" y="176" width="398" height="286" rx="24" fill="#0F1629" stroke="#243041"/>
+  <text x="118" y="218" fill="#E2E8F0" font-size="19" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Create server</text>
+  <rect x="118" y="246" width="338" height="70" rx="18" fill="#112033" stroke="#34D399" stroke-width="2"/>
+  <text x="146" y="286" fill="#F8FAFC" font-size="24" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Paper</text>
+  <rect x="344" y="262" width="92" height="24" rx="12" fill="#123E34"/>
+  <text x="360" y="279" fill="#86EFAC" font-size="12" font-family="Segoe UI, Arial, sans-serif" font-weight="700">RECOMMENDED</text>
+  <rect x="118" y="332" width="338" height="54" rx="18" fill="#111B2E" stroke="#243041"/>
+  <text x="146" y="366" fill="#E2E8F0" font-size="20" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Fabric</text>
+  <rect x="118" y="400" width="338" height="54" rx="18" fill="#111B2E" stroke="#243041"/>
+  <text x="146" y="434" fill="#E2E8F0" font-size="20" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Vanilla</text>
+
+  <rect x="88" y="488" width="398" height="312" rx="24" fill="#0F1629" stroke="#243041"/>
+  <text x="118" y="530" fill="#E2E8F0" font-size="19" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Version picker</text>
+  <rect x="118" y="560" width="338" height="42" rx="14" fill="#111B2E"/>
+  <text x="142" y="587" fill="#F8FAFC" font-size="16" font-family="Segoe UI, Arial, sans-serif">1.21.11</text>
+  <text x="118" y="632" fill="#94A3B8" font-size="14" font-family="Segoe UI, Arial, sans-serif">LMCD only shows runtime-supported versions.</text>
+  <rect x="118" y="658" width="338" height="32" rx="12" fill="#0C1322" stroke="#233146"/>
+  <text x="140" y="679" fill="#86EFAC" font-size="13" font-family="Segoe UI, Arial, sans-serif">Paper supports this version</text>
+  <rect x="118" y="704" width="338" height="32" rx="12" fill="#0C1322" stroke="#233146"/>
+  <text x="140" y="725" fill="#93C5FD" font-size="13" font-family="Segoe UI, Arial, sans-serif">Fabric supports this version</text>
+
+  <rect x="524" y="176" width="814" height="296" rx="24" fill="#0F1629" stroke="#243041"/>
+  <text x="554" y="218" fill="#E2E8F0" font-size="19" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Built-in add-on browser</text>
+  <rect x="554" y="246" width="594" height="42" rx="14" fill="#111B2E" stroke="#243041"/>
+  <text x="578" y="273" fill="#64748B" font-size="15" font-family="Segoe UI, Arial, sans-serif">Search Modrinth for Paper plugins or Fabric mods</text>
+  <rect x="1166" y="246" width="142" height="42" rx="14" fill="#13324E"/>
+  <text x="1210" y="273" fill="#DBEAFE" font-size="15" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Search</text>
+  <rect x="554" y="314" width="754" height="56" rx="18" fill="#101A2E"/>
+  <text x="578" y="348" fill="#F8FAFC" font-size="18" font-family="Segoe UI, Arial, sans-serif" font-weight="700">GrimAC</text>
+  <text x="720" y="348" fill="#94A3B8" font-size="15" font-family="Segoe UI, Arial, sans-serif">Paper anti-cheat</text>
+  <rect x="1180" y="326" width="104" height="30" rx="10" fill="#123E34"/>
+  <text x="1213" y="346" fill="#ECFDF5" font-size="13" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Install</text>
+  <rect x="554" y="386" width="754" height="56" rx="18" fill="#101A2E"/>
+  <text x="578" y="420" fill="#F8FAFC" font-size="18" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Simple AntiFreecam</text>
+  <text x="795" y="420" fill="#94A3B8" font-size="15" font-family="Segoe UI, Arial, sans-serif">Freecam protection</text>
+  <rect x="1180" y="398" width="104" height="30" rx="10" fill="#123E34"/>
+  <text x="1213" y="418" fill="#ECFDF5" font-size="13" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Install</text>
+
+  <rect x="524" y="502" width="386" height="298" rx="24" fill="#0F1629" stroke="#243041"/>
+  <text x="554" y="544" fill="#E2E8F0" font-size="19" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Installed add-ons</text>
+  <rect x="554" y="572" width="326" height="52" rx="16" fill="#101A2E"/>
+  <text x="578" y="604" fill="#F8FAFC" font-size="17" font-family="Segoe UI, Arial, sans-serif" font-weight="700">grimac-bukkit.jar</text>
+  <rect x="554" y="638" width="326" height="52" rx="16" fill="#101A2E"/>
+  <text x="578" y="670" fill="#F8FAFC" font-size="17" font-family="Segoe UI, Arial, sans-serif" font-weight="700">antifreecam.jar</text>
+  <rect x="554" y="704" width="326" height="52" rx="16" fill="#101A2E"/>
+  <text x="578" y="736" fill="#F8FAFC" font-size="17" font-family="Segoe UI, Arial, sans-serif" font-weight="700">moddetectorplugin.jar</text>
+
+  <rect x="952" y="502" width="386" height="298" rx="24" fill="#0F1629" stroke="#243041"/>
+  <text x="982" y="544" fill="#E2E8F0" font-size="19" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Compatibility panel</text>
+  <rect x="982" y="572" width="326" height="72" rx="18" fill="#132233" stroke="#38BDF8"/>
+  <text x="1008" y="606" fill="#F8FAFC" font-size="18" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Ready</text>
+  <text x="1008" y="630" fill="#94A3B8" font-size="14" font-family="Segoe UI, Arial, sans-serif">No blocking compatibility issues found.</text>
+  <rect x="982" y="662" width="326" height="94" rx="18" fill="#2A1318" stroke="#7F1D1D"/>
+  <text x="1008" y="698" fill="#FCA5A5" font-size="16" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Example warning</text>
+  <text x="1008" y="726" fill="#FECACA" font-size="14" font-family="Segoe UI, Arial, sans-serif">Client-only or missing dependency issues surface here before launch.</text>
+</svg>

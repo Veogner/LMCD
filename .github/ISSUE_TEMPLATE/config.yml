@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: LMCD release page
+    url: https://github.com/Veogner/LMCD/releases/tag/1m26c1ea
+    about: Download the current Windows builds and check release notes first.
+  - name: LMCD setup guide
+    url: https://github.com/Veogner/LMCD#quick-start
+    about: Use the README quick-start flow before opening a support issue.

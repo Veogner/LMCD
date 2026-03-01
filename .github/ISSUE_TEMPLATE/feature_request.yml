@@ -1,0 +1,62 @@
+name: Feature request
+description: Suggest a product improvement for LMCD.
+title: "[Feature]: "
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep this focused on one improvement. Explain the workflow, not just the feature name.
+  - type: input
+    id: summary
+    attributes:
+      label: Feature summary
+      placeholder: Add one-click dependency install for Fabric mods.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Server creation
+        - Runtime/version management
+        - Mods/plugins
+        - Backups and restore
+        - Console and monitoring
+        - UI/UX
+        - Packaging and releases
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      placeholder: Right now I can install a Fabric mod, but I still have to go find and install its dependencies manually.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      placeholder: Add a dependency check panel with a one-click install action for missing Fabric dependencies.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: I can manage the mods folder manually, but it is slow and easy to break.
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - Nice to have
+        - Useful for regular users
+        - High value / should be prioritized
+    validations:
+      required: true

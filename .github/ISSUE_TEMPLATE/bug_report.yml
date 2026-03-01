@@ -1,0 +1,86 @@
+name: Bug report
+description: Report a reproducible problem in LMCD.
+title: "[Bug]: "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Please give enough detail to reproduce the problem from a clean start.
+  - type: input
+    id: lmcd-version
+    attributes:
+      label: LMCD version
+      description: Which LMCD release are you using?
+      placeholder: 1m26c1ea
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Server runtime
+      description: Which server runtime was active when the problem happened?
+      options:
+        - Paper
+        - Fabric
+        - Vanilla
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: install-type
+    attributes:
+      label: Install type
+      options:
+        - Setup EXE
+        - Portable EXE
+        - Source build
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What broke?
+      description: One short description of the bug.
+      placeholder: Starting a Paper server closes the app after the loading spinner finishes.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps.
+      placeholder: |
+        1. Open LMCD
+        2. Select an existing Paper server
+        3. Click Start Server
+        4. Wait for the console to initialize
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      placeholder: The server should stay running and the console should stay visible.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      placeholder: The window closes and no server process stays alive.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, errors, or screenshots
+      description: Paste the important part of the LMCD console, crash text, or attach screenshots.
+      render: shell
+  - type: input
+    id: os-version
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2

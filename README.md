@@ -34,3 +34,7 @@ Packaged Windows artifacts are generated into `release/`, while the distributabl
 
 - `release/LMCD-1m26c1ea-Setup-x64.exe`
 - `release/LMCD-1m26c1ea-Portable-x64.exe`
+
+## License
+
+MIT. See `LICENSE`.

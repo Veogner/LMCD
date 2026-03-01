@@ -38,7 +38,8 @@ const MODE_PRESET_OPTIONS: Array<{
     id: "hardcore",
     label: "Hardcore Ironman",
     shortLabel: "Hardcore",
-    description: "One life, hard difficulty, survival mode, and cheat guard meant to stay locked.",
+    description:
+      "One life, hard difficulty, survival mode, cheat guard locked on, and the world wipes with its backups if a death is detected.",
   },
   {
     id: "survival_locked",
@@ -259,6 +260,16 @@ const createPropertyDraft = (
   allowFlight: nextProps["allow-flight"] === "true",
   whitelist: nextProps["white-list"] === "true",
 });
+
+const getBackupPolicySummary = (profile?: Profile | null) => {
+  if (!profile) {
+    return "Each server keeps up to 4 backups.";
+  }
+  if (profile.modePreset === "hardcore") {
+    return "Hardcore servers keep up to 4 backups, auto-save every 3 starts, and wipe the world plus backups if a death is detected.";
+  }
+  return "Non-hardcore servers keep up to 4 backups and auto-save every 2 starts. Risky add-on changes still snapshot first.";
+};
 
 const clampInteger = (
   value: string,
@@ -1865,8 +1876,7 @@ function App() {
                       <div>
                         <p className="text-sm font-semibold text-white">Backups</p>
                         <p className="mt-1 text-xs text-slate/60">
-                          Auto-backups run before server starts and before add-on changes. You can
-                          also make one manually.
+                          {getBackupPolicySummary(activeProfile)}
                         </p>
                       </div>
                       <button

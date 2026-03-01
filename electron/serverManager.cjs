@@ -115,7 +115,45 @@ const ADDON_CONTEXT = {
 const BUILTIN_FABRIC_DEPENDENCIES = new Set(["fabricloader", "java", "minecraft"]);
 const PAPER_LOADERS = ["paper", "purpur", "folia", "spigot", "bukkit"];
 const MODRINTH_API_BASE = "https://api.modrinth.com/v2";
-const BACKUP_SKIP_NAMES = new Set(["cache", "libraries", "logs", "versions"]);
+const PROFILE_STATE_FILE = ".lmcd-state.json";
+const BACKUP_SKIP_NAMES = new Set(["cache", "libraries", "logs", "versions", PROFILE_STATE_FILE]);
+const HARDCORE_DEATH_MARKERS = [
+  " was slain by ",
+  " was shot by ",
+  " was fireballed by ",
+  " was blown up by ",
+  " was killed by ",
+  " was struck by lightning",
+  " fell from ",
+  " fell off ",
+  " hit the ground too hard",
+  " fell out of the world",
+  " tried to swim in lava",
+  " discovered the floor was lava",
+  " walked into fire",
+  " went up in flames",
+  " burned to death",
+  " drowned",
+  " suffocated in a wall",
+  " starved to death",
+  " withered away",
+  " froze to death",
+  " was squashed by ",
+  " was pricked to death",
+  " was impaled by ",
+  " was impaled on ",
+  " was pummeled by ",
+  " was roasted in dragon breath",
+  " experienced kinetic energy",
+  " was doomed to fall",
+  " was skewered by a falling stalactite",
+  " was poked to death by a sweet berry bush",
+  " was stung to death",
+  " was obliterated by a sonically-charged shriek",
+  " blew up",
+  " died",
+];
+const HARDCORE_LOG_IGNORE_PREFIXES = ["<", "[Not Secure] <", "[@]", "[Rcon]", "[Server]"];
 
 function parseProperties(raw) {
   return raw
@@ -261,6 +299,8 @@ class ServerManager extends EventEmitter {
     this.jarPath = this.getJarPath(this.currentVersion, this.currentSoftware);
     this.serverProcess = null;
     this.startedAt = null;
+    this.logBuffer = "";
+    this.pendingHardcoreReset = null;
     this.ensureBaseDir();
   }
 
@@ -318,6 +358,40 @@ class ServerManager extends EventEmitter {
 
   getBackupsDir(profileId = this.profileName) {
     return path.join(this.baseRoot, "backups", profileId);
+  }
+
+  getProfileStatePath(profileDir = this.profileDir) {
+    return path.join(profileDir, PROFILE_STATE_FILE);
+  }
+
+  readProfileState(profileDir = this.profileDir) {
+    const statePath = this.getProfileStatePath(profileDir);
+    const parsed = safeJsonParse(fs.existsSync(statePath) ? fs.readFileSync(statePath, "utf8") : "{}") || {};
+    return {
+      startsSinceAutoBackup: Math.max(0, Number(parsed.startsSinceAutoBackup) || 0),
+    };
+  }
+
+  writeProfileState(nextState = {}, profileDir = this.profileDir) {
+    const statePath = this.getProfileStatePath(profileDir);
+    const normalized = {
+      startsSinceAutoBackup: Math.max(0, Number(nextState.startsSinceAutoBackup) || 0),
+    };
+    fs.mkdirSync(profileDir, { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify(normalized, null, 2));
+    return normalized;
+  }
+
+  resetProfileState(profileDir = this.profileDir) {
+    return this.writeProfileState({ startsSinceAutoBackup: 0 }, profileDir);
+  }
+
+  getBackupPolicy(profile = this.getActiveProfile()) {
+    return {
+      maxBackups: 4,
+      startInterval: profile.modePreset === "hardcore" ? 3 : 2,
+      wipeOnDeath: profile.modePreset === "hardcore",
+    };
   }
 
   hasMeaningfulProfileContent(profileDir = this.profileDir) {
@@ -381,6 +455,27 @@ class ServerManager extends EventEmitter {
       .sort((left, right) => right.createdAt - left.createdAt);
   }
 
+  pruneBackups(profileId = this.profileName, maxBackups = this.getBackupPolicy().maxBackups) {
+    if (maxBackups < 1) {
+      this.deleteBackups(profileId);
+      return [];
+    }
+
+    const backupRoot = this.getBackupsDir(profileId);
+    const backups = this.listBackups(profileId);
+    for (const backup of backups.slice(maxBackups)) {
+      fs.rmSync(path.join(backupRoot, backup.id), { recursive: true, force: true });
+    }
+    return this.listBackups(profileId);
+  }
+
+  deleteBackups(profileId = this.profileName) {
+    const backupRoot = this.getBackupsDir(profileId);
+    if (fs.existsSync(backupRoot)) {
+      fs.rmSync(backupRoot, { recursive: true, force: true });
+    }
+  }
+
   createBackup(reason = "manual") {
     if (!this.hasMeaningfulProfileContent()) {
       return {
@@ -393,11 +488,18 @@ class ServerManager extends EventEmitter {
 
     const backupRoot = this.getBackupsDir();
     const createdAt = Date.now();
-    const backupId = `${createdAt}-${String(reason || "manual")
+    const backupIdBase = `${createdAt}-${String(reason || "manual")
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "") || "backup"}`;
-    const backupDir = path.join(backupRoot, backupId);
+    let backupId = backupIdBase;
+    let backupDir = path.join(backupRoot, backupId);
+    let suffix = 1;
+    while (fs.existsSync(backupDir)) {
+      backupId = `${backupIdBase}-${suffix}`;
+      backupDir = path.join(backupRoot, backupId);
+      suffix += 1;
+    }
     const backupDataDir = path.join(backupDir, "data");
 
     fs.mkdirSync(backupDataDir, { recursive: true });
@@ -415,6 +517,7 @@ class ServerManager extends EventEmitter {
       sizeBytes: this.getDirectorySize(backupDataDir),
     };
     fs.writeFileSync(path.join(backupDir, "metadata.json"), JSON.stringify(backupEntry, null, 2));
+    this.pruneBackups();
     return backupEntry;
   }
 
@@ -667,6 +770,43 @@ class ServerManager extends EventEmitter {
     return this.currentProfile;
   }
 
+  sanitizeWorldName(value) {
+    const safeName = path.basename(String(value || "").trim());
+    if (!safeName || safeName === "." || safeName === "..") {
+      return "world";
+    }
+    return safeName;
+  }
+
+  getConfiguredLevelName(profileDir = this.profileDir) {
+    const propertiesPath = path.join(profileDir, "server.properties");
+    if (!fs.existsSync(propertiesPath)) {
+      return "world";
+    }
+
+    try {
+      const raw = fs.readFileSync(propertiesPath, "utf8");
+      const parsed = parseProperties(raw);
+      return this.sanitizeWorldName(parsed["level-name"] || "world");
+    } catch {
+      return "world";
+    }
+  }
+
+  getKnownWorldNames(profileDir = this.profileDir) {
+    const configured = this.getConfiguredLevelName(profileDir);
+    return [...new Set(["world", "world_nether", "world_the_end", configured, `${configured}_nether`, `${configured}_the_end`])];
+  }
+
+  deleteWorldData(profileDir = this.profileDir) {
+    for (const worldName of this.getKnownWorldNames(profileDir)) {
+      const worldPath = path.join(profileDir, worldName);
+      if (fs.existsSync(worldPath)) {
+        fs.rmSync(worldPath, { recursive: true, force: true });
+      }
+    }
+  }
+
   getPresetPolicy(profile = this.getActiveProfile()) {
     return PRESET_POLICIES[profile.modePreset] || PRESET_POLICIES[DEFAULT_MODE_PRESET];
   }
@@ -735,9 +875,123 @@ class ServerManager extends EventEmitter {
   }
 
   hasWorldData(profileDir = this.profileDir) {
-    return ["world", "world_nether", "world_the_end", "level.dat", "session.lock"].some(
-      (entry) => fs.existsSync(path.join(profileDir, entry)),
+    return this.getKnownWorldNames(profileDir).some((entry) => fs.existsSync(path.join(profileDir, entry)));
+  }
+
+  registerServerStart(profile = this.getActiveProfile()) {
+    const policy = this.getBackupPolicy(profile);
+    const state = this.readProfileState();
+    state.startsSinceAutoBackup += 1;
+
+    let createdBackup = null;
+    if (this.hasMeaningfulProfileContent() && state.startsSinceAutoBackup >= policy.startInterval) {
+      createdBackup = this.createBackup(`auto-start-${policy.startInterval}`);
+      state.startsSinceAutoBackup = 0;
+    }
+
+    this.writeProfileState(state);
+    return {
+      createdBackup,
+      policy,
+      state,
+    };
+  }
+
+  shouldWipeHardcoreWorldFromLog(line) {
+    if (!this.getBackupPolicy().wipeOnDeath) {
+      return false;
+    }
+
+    const rawLine = String(line || "").trim();
+    if (!rawLine) {
+      return false;
+    }
+
+    const payload = rawLine.includes("]: ") ? rawLine.split("]: ").pop() || rawLine : rawLine;
+    if (!payload) {
+      return false;
+    }
+
+    if (HARDCORE_LOG_IGNORE_PREFIXES.some((prefix) => payload.startsWith(prefix))) {
+      return false;
+    }
+    if (payload.includes(" issued server command:")) {
+      return false;
+    }
+    if (
+      payload.includes("lost connection: You have died") ||
+      payload.includes("Game over, man, it's game over")
+    ) {
+      return true;
+    }
+
+    return HARDCORE_DEATH_MARKERS.some((marker) => payload.includes(marker));
+  }
+
+  queueHardcoreReset(triggerLine) {
+    if (this.pendingHardcoreReset || !this.getBackupPolicy().wipeOnDeath) {
+      return;
+    }
+
+    this.pendingHardcoreReset = {
+      profileId: this.currentProfile.id,
+      profileDir: this.profileDir,
+      triggerLine: String(triggerLine || "").trim(),
+    };
+    this.emit(
+      "log",
+      "Hardcore death detected. LMCD will delete this world and all backups after shutdown.",
     );
+
+    this.stop().catch((error) => {
+      this.emit(
+        "log",
+        `Hardcore cleanup could not stop the server cleanly: ${error.message || String(error)}`,
+      );
+    });
+  }
+
+  applyPendingHardcoreReset() {
+    if (!this.pendingHardcoreReset) {
+      return false;
+    }
+
+    const pending = this.pendingHardcoreReset;
+    this.pendingHardcoreReset = null;
+    this.deleteWorldData(pending.profileDir || this.profileDir);
+    this.deleteBackups(pending.profileId || this.profileName);
+    this.resetProfileState(pending.profileDir || this.profileDir);
+    this.emit("log", "Hardcore cleanup finished. The world and all backups were deleted.");
+    return true;
+  }
+
+  handleServerOutput(chunk) {
+    this.logBuffer += String(chunk || "");
+    const lines = this.logBuffer.split(/\r?\n/);
+    this.logBuffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const normalized = line.replace(/\r$/, "");
+      if (!normalized) {
+        continue;
+      }
+      this.emit("log", normalized);
+      if (this.shouldWipeHardcoreWorldFromLog(normalized)) {
+        this.queueHardcoreReset(normalized);
+      }
+    }
+  }
+
+  flushLogBuffer() {
+    const pending = this.logBuffer.replace(/\r$/, "").trim();
+    this.logBuffer = "";
+    if (!pending) {
+      return;
+    }
+    this.emit("log", pending);
+    if (this.shouldWipeHardcoreWorldFromLog(pending)) {
+      this.queueHardcoreReset(pending);
+    }
   }
 
   syncWorldLockState() {
@@ -788,6 +1042,7 @@ class ServerManager extends EventEmitter {
     if (fs.existsSync(profileDir)) {
       fs.rmSync(profileDir, { recursive: true, force: true });
     }
+    this.deleteBackups(profileId);
     return { deleted: true, id: profileId };
   }
 
@@ -1321,9 +1576,7 @@ class ServerManager extends EventEmitter {
       motd: options.motd || this.currentProfile.motd || DEFAULT_MOTD,
     });
 
-    if (this.hasMeaningfulProfileContent()) {
-      this.createBackup("before-start");
-    }
+    this.registerServerStart();
 
     await this.ensureJar(this.currentVersion, this.currentSoftware);
     await this.acceptEula();
@@ -1354,14 +1607,16 @@ class ServerManager extends EventEmitter {
     });
 
     this.serverProcess.stdout.on("data", (data) => {
-      this.emit("log", data.toString());
+      this.handleServerOutput(data);
     });
     this.serverProcess.stderr.on("data", (data) => {
-      this.emit("log", data.toString());
+      this.handleServerOutput(data);
     });
     this.serverProcess.on("close", (code) => {
+      this.flushLogBuffer();
       this.emit("log", `Server exited with code ${code}`);
       this.serverProcess = null;
+      this.applyPendingHardcoreReset();
       this.emit("status", {
         running: false,
         profile: lockedProfile.id,

@@ -6,7 +6,7 @@ LMCD is a Windows desktop app for running and managing local Minecraft servers w
 
 [Download the latest release](https://github.com/Veogner/LMCD/releases/tag/1m26c1ea)  |  [Read the release notes](docs/release-notes/1m26c1ea.md)  |  [Report a bug](https://github.com/Veogner/LMCD/issues/new/choose)
 
-![LMCD overview](docs/screenshots/lmcd-overview.svg)
+![LMCD overview](docs/screenshots/lmcd-overview.png)
 
 ## Why LMCD
 
@@ -38,15 +38,15 @@ LMCD is a Windows desktop app for running and managing local Minecraft servers w
 
 ### Main workspace
 
-![LMCD server workspace](docs/screenshots/lmcd-overview.svg)
+![LMCD server workspace](docs/screenshots/lmcd-overview.png)
 
 ### Runtime and add-on flow
 
-![LMCD runtime and add-ons](docs/screenshots/lmcd-runtime-addons.svg)
+![LMCD runtime and add-ons](docs/screenshots/lmcd-runtime-addons.png)
 
 ### Hardcore and backup policy
 
-![LMCD hardcore and backups](docs/screenshots/lmcd-hardcore-backups.svg)
+![LMCD hardcore and backups](docs/screenshots/lmcd-hardcore-backups.png)
 
 ## Download
 

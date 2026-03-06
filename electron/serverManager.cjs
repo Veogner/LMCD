@@ -4,9 +4,12 @@ const https = require("https");
 const { spawn, spawnSync } = require("child_process");
 const EventEmitter = require("events");
 const os = require("os");
+const net = require("net");
 const pidusage = require("pidusage");
 const AdmZip = require("adm-zip");
 const yaml = require("js-yaml");
+const natUpnp = require("nat-upnp");
+const { Rcon } = require("rcon-client");
 const {
   APP_NAME,
   APP_RELEASE_TAG,
@@ -19,6 +22,7 @@ const {
   readProfiles,
   writeProfiles,
 } = require("./profiles.cjs");
+const { setSecret, getSecret, deleteSecret } = require("./credentials.cjs");
 
 const SAFE_CONSOLE_COMMANDS = new Set([
   "ban",
@@ -71,7 +75,7 @@ const BASE_PROPERTIES = {
   motd: DEFAULT_MOTD,
   "server-port": "25565",
   "max-players": "8",
-  "view-distance": "12",
+  "view-distance": "20",
   "simulation-distance": "10",
   "white-list": "false",
   "enforce-whitelist": "false",
@@ -116,7 +120,27 @@ const BUILTIN_FABRIC_DEPENDENCIES = new Set(["fabricloader", "java", "minecraft"
 const PAPER_LOADERS = ["paper", "purpur", "folia", "spigot", "bukkit"];
 const MODRINTH_API_BASE = "https://api.modrinth.com/v2";
 const PROFILE_STATE_FILE = ".lmcd-state.json";
-const BACKUP_SKIP_NAMES = new Set(["cache", "libraries", "logs", "versions", PROFILE_STATE_FILE]);
+const ADDON_MANIFEST_FILE = ".lmcd-addons.json";
+const BACKUP_SKIP_NAMES = new Set([
+  "cache",
+  "libraries",
+  "logs",
+  "versions",
+  PROFILE_STATE_FILE,
+  ADDON_MANIFEST_FILE,
+]);
+const AUTO_BACKUP_INTERVAL_MS = 5 * 60 * 1000;
+const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
+const LOG_BATCH_FLUSH_MS = 25;
+const LOG_BATCH_MAX_LINES = 50;
+const JAR_CLEANUP_MAX_AGE_DAYS = 30;
+const BACKUP_CLEANUP_MAX_AGE_DAYS = 30;
+const LOG_CLEANUP_MAX_AGE_DAYS = 14;
+const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
+const PLAYER_COUNT_LOG_PATTERN = /There are (\d+) of a max of \d+ players online/i;
+const LOCALHOST_CANDIDATES = new Set(["", "0.0.0.0", "127.0.0.1", "localhost", "::"]);
+const REMOTE_CONNECT_RETRY_MS = 1500;
+const CATALOG_SORT_INDEX = new Set(["relevance", "downloads", "follows", "updated"]);
 const HARDCORE_DEATH_MARKERS = [
   " was slain by ",
   " was shot by ",
@@ -154,6 +178,141 @@ const HARDCORE_DEATH_MARKERS = [
   " died",
 ];
 const HARDCORE_LOG_IGNORE_PREFIXES = ["<", "[Not Secure] <", "[@]", "[Rcon]", "[Server]"];
+
+const SERVER_PROPERTY_SCHEMA = [
+  {
+    category: "Network",
+    key: "server-ip",
+    label: "Bind IP",
+    type: "text",
+    defaultValue: "",
+    helper: "Leave blank or 0.0.0.0 for all interfaces. Set a specific LAN IP only when required.",
+  },
+  {
+    category: "Network",
+    key: "server-port",
+    label: "Port",
+    type: "number",
+    defaultValue: "25565",
+    min: 1,
+    max: 65535,
+    helper: "Public join port. Requires router port forward for internet access.",
+  },
+  {
+    category: "Security",
+    key: "online-mode",
+    label: "Online Mode",
+    type: "boolean",
+    defaultValue: "true",
+    helper: "Keep enabled to verify player accounts with Mojang services.",
+  },
+  {
+    category: "Security",
+    key: "white-list",
+    label: "Whitelist",
+    type: "boolean",
+    defaultValue: "false",
+    helper: "Only allow listed players.",
+  },
+  {
+    category: "Security",
+    key: "enforce-whitelist",
+    label: "Enforce Whitelist",
+    type: "boolean",
+    defaultValue: "false",
+    helper: "Kick non-whitelisted players immediately when enabled.",
+  },
+  {
+    category: "Security",
+    key: "enable-command-block",
+    label: "Command Blocks",
+    type: "boolean",
+    defaultValue: "false",
+    helper: "Required for command block automation.",
+  },
+  {
+    category: "Gameplay",
+    key: "motd",
+    label: "MOTD",
+    type: "text",
+    defaultValue: DEFAULT_MOTD,
+    helper: "Shown in the multiplayer server list.",
+  },
+  {
+    category: "Gameplay",
+    key: "max-players",
+    label: "Max Players",
+    type: "number",
+    defaultValue: "8",
+    min: 1,
+    max: 500,
+    helper: "Maximum concurrent players allowed.",
+  },
+  {
+    category: "Gameplay",
+    key: "gamemode",
+    label: "Default Gamemode",
+    type: "enum",
+    defaultValue: "survival",
+    enumValues: ["survival", "creative", "adventure", "spectator"],
+    helper: "Default gamemode for new players.",
+  },
+  {
+    category: "Gameplay",
+    key: "difficulty",
+    label: "Difficulty",
+    type: "enum",
+    defaultValue: "normal",
+    enumValues: ["peaceful", "easy", "normal", "hard"],
+    helper: "Base difficulty level.",
+  },
+  {
+    category: "Gameplay",
+    key: "pvp",
+    label: "PVP",
+    type: "boolean",
+    defaultValue: "true",
+    helper: "Allow player-versus-player combat.",
+  },
+  {
+    category: "Performance",
+    key: "view-distance",
+    label: "View Distance",
+    type: "number",
+    defaultValue: "20",
+    min: 2,
+    max: 32,
+    helper: "Higher values increase CPU and bandwidth use.",
+  },
+  {
+    category: "Performance",
+    key: "simulation-distance",
+    label: "Simulation Distance",
+    type: "number",
+    defaultValue: "10",
+    min: 2,
+    max: 32,
+    helper: "Controls chunk ticking range around players.",
+  },
+  {
+    category: "Performance",
+    key: "spawn-protection",
+    label: "Spawn Protection",
+    type: "number",
+    defaultValue: "0",
+    min: 0,
+    max: 64,
+    helper: "Radius around world spawn protected from edits.",
+  },
+  {
+    category: "Advanced",
+    key: "allow-flight",
+    label: "Allow Flight",
+    type: "boolean",
+    defaultValue: "false",
+    helper: "Required for mods/plugins that use flight mechanics.",
+  },
+];
 
 function parseProperties(raw) {
   return raw
@@ -301,7 +460,84 @@ class ServerManager extends EventEmitter {
     this.startedAt = null;
     this.logBuffer = "";
     this.pendingHardcoreReset = null;
+    this.autoBackupTimer = null;
+    this.autoBackupInProgress = false;
+    this.idleCheckTimer = null;
+    this.idleShutdownMinutes = 0;
+    this.lastKnownOnlinePlayers = 0;
+    this.idleSince = null;
+    this.idleShutdownPending = false;
+    this.remoteRcon = null;
+    this.remoteConnected = false;
+    this.remotePollTimer = null;
+    this.upnpClient = null;
+    this.logBatchQueue = [];
+    this.logBatchTimer = null;
+    this.addonMetadataCache = new Map();
     this.ensureBaseDir();
+  }
+
+  emit(eventName, ...args) {
+    if (eventName === "log" && typeof args[0] === "string") {
+      this.queueLogLine(args[0]);
+    }
+    return super.emit(eventName, ...args);
+  }
+
+  clearLogBatchTimer() {
+    if (this.logBatchTimer) {
+      clearTimeout(this.logBatchTimer);
+      this.logBatchTimer = null;
+    }
+  }
+
+  shouldFlushLogImmediately(line) {
+    const lowered = String(line || "").toLowerCase();
+    return (
+      lowered.includes(" error") ||
+      lowered.includes("exception") ||
+      lowered.includes("fatal") ||
+      lowered.includes("failed") ||
+      lowered.includes("crash")
+    );
+  }
+
+  queueLogLine(line) {
+    const normalized = String(line || "").replace(/\r?\n$/, "");
+    if (!normalized) {
+      return;
+    }
+
+    this.logBatchQueue.push(normalized);
+    if (
+      this.logBatchQueue.length >= LOG_BATCH_MAX_LINES ||
+      this.shouldFlushLogImmediately(normalized)
+    ) {
+      this.flushLogBatch();
+      return;
+    }
+
+    if (!this.logBatchTimer) {
+      this.logBatchTimer = setTimeout(() => {
+        this.flushLogBatch();
+      }, LOG_BATCH_FLUSH_MS);
+      if (typeof this.logBatchTimer.unref === "function") {
+        this.logBatchTimer.unref();
+      }
+    }
+  }
+
+  flushLogBatch() {
+    this.clearLogBatchTimer();
+    if (this.logBatchQueue.length === 0) {
+      return;
+    }
+    const batch = this.logBatchQueue.splice(0, this.logBatchQueue.length);
+    super.emit("log-batch", batch);
+  }
+
+  clearAddonMetadataCache() {
+    this.addonMetadataCache.clear();
   }
 
   getJarPath(
@@ -329,6 +565,7 @@ class ServerManager extends EventEmitter {
       properties: path.join(this.profileDir, "server.properties"),
       eula: path.join(this.profileDir, "eula.txt"),
       logs: path.join(this.profileDir, "logs"),
+      addonsManifest: path.join(this.profileDir, ADDON_MANIFEST_FILE),
     };
   }
 
@@ -354,6 +591,511 @@ class ServerManager extends EventEmitter {
       return null;
     }
     return path.join(this.profileDir, context.folderName);
+  }
+
+  listPropertySchema() {
+    return SERVER_PROPERTY_SCHEMA.map((entry) => ({ ...entry }));
+  }
+
+  getAddonManifestPath(profileDir = this.profileDir) {
+    return path.join(profileDir, ADDON_MANIFEST_FILE);
+  }
+
+  readAddonManifest(profileDir = this.profileDir) {
+    const manifestPath = this.getAddonManifestPath(profileDir);
+    const parsed = safeJsonParse(fs.existsSync(manifestPath) ? fs.readFileSync(manifestPath, "utf8") : "{}");
+    if (!parsed || typeof parsed !== "object") {
+      return { entries: {} };
+    }
+    return {
+      entries: typeof parsed.entries === "object" && parsed.entries ? parsed.entries : {},
+    };
+  }
+
+  writeAddonManifest(nextManifest, profileDir = this.profileDir) {
+    const manifestPath = this.getAddonManifestPath(profileDir);
+    const normalized = {
+      entries:
+        nextManifest && typeof nextManifest.entries === "object" && nextManifest.entries
+          ? nextManifest.entries
+          : {},
+    };
+    fs.mkdirSync(profileDir, { recursive: true });
+    fs.writeFileSync(manifestPath, JSON.stringify(normalized, null, 2));
+    return normalized;
+  }
+
+  setAddonCatalogMetadata(fileName, metadata = {}, profileDir = this.profileDir) {
+    if (!fileName) {
+      return this.readAddonManifest(profileDir);
+    }
+    const manifest = this.readAddonManifest(profileDir);
+    manifest.entries[fileName] = {
+      projectId: String(metadata.projectId || "").trim(),
+      installedVersionId: String(metadata.installedVersionId || "").trim(),
+      installedVersionNumber: String(metadata.installedVersionNumber || "").trim(),
+      updatedAt: Date.now(),
+    };
+    return this.writeAddonManifest(manifest, profileDir);
+  }
+
+  clearAddonCatalogMetadata(fileName, profileDir = this.profileDir) {
+    const safeName = String(fileName || "").trim();
+    if (!safeName) {
+      return this.readAddonManifest(profileDir);
+    }
+    const manifest = this.readAddonManifest(profileDir);
+    delete manifest.entries[safeName];
+    return this.writeAddonManifest(manifest, profileDir);
+  }
+
+  isRemoteProfile(profile = this.getActiveProfile()) {
+    return profile.profileType === "remote";
+  }
+
+  async setRemotePassword(profileId, password) {
+    const safeProfileId = String(profileId || "").trim();
+    if (!safeProfileId) {
+      throw new Error("Profile id is required for remote credentials.");
+    }
+    const credentialRef = `remote:${safeProfileId}`;
+    await setSecret(credentialRef, password || "");
+    return credentialRef;
+  }
+
+  async getRemotePassword(profile = this.getActiveProfile()) {
+    const ref = String(profile.rconPasswordRef || "").trim();
+    if (!ref) {
+      return "";
+    }
+    return getSecret(ref);
+  }
+
+  async clearRemotePassword(profile) {
+    const ref = String((profile && profile.rconPasswordRef) || "").trim();
+    if (!ref) {
+      return;
+    }
+    await deleteSecret(ref);
+  }
+
+  async setRemoteCredentials(profileId, password) {
+    const profile = await this.resolveRemoteProfile(profileId);
+    if (!this.isRemoteProfile(profile)) {
+      throw new Error("Selected profile is not a remote server.");
+    }
+
+    const safePassword = String(password || "");
+    if (!safePassword.trim()) {
+      throw new Error("Remote RCON password cannot be empty.");
+    }
+
+    const credentialRef = await this.setRemotePassword(profile.id, safePassword);
+    const profiles = readProfiles();
+    const nextProfiles = profiles.map((item) =>
+      item.id === profile.id ? { ...item, rconPasswordRef: credentialRef } : item,
+    );
+    const saved = writeProfiles(nextProfiles);
+    const current = saved.find((item) => item.id === profile.id);
+    if (current && current.id === this.currentProfile.id) {
+      this.currentProfile = current;
+    }
+    return {
+      ok: true,
+      profileId: profile.id,
+      rconPasswordRef: credentialRef,
+    };
+  }
+
+  async clearRemoteCredentials(profileId) {
+    const profile = await this.resolveRemoteProfile(profileId);
+    await this.clearRemotePassword(profile);
+    const profiles = readProfiles();
+    const nextProfiles = profiles.map((item) =>
+      item.id === profile.id ? { ...item, rconPasswordRef: "" } : item,
+    );
+    const saved = writeProfiles(nextProfiles);
+    const current = saved.find((item) => item.id === profile.id);
+    if (current && current.id === this.currentProfile.id) {
+      this.currentProfile = current;
+    }
+    return {
+      ok: true,
+      profileId: profile.id,
+    };
+  }
+
+  async resolveRemoteProfile(profileId = this.profileName) {
+    const profiles = readProfiles();
+    const found = profiles.find((item) => item.id === profileId);
+    if (!found) {
+      throw new Error("Remote profile was not found.");
+    }
+    return normalizeProfile(found);
+  }
+
+  async wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  clearRemotePoll() {
+    if (this.remotePollTimer) {
+      clearInterval(this.remotePollTimer);
+      this.remotePollTimer = null;
+    }
+  }
+
+  async disconnectRemote() {
+    this.clearRemotePoll();
+    if (!this.remoteRcon) {
+      this.remoteConnected = false;
+      return;
+    }
+    const client = this.remoteRcon;
+    this.remoteRcon = null;
+    this.remoteConnected = false;
+    try {
+      await client.end();
+    } catch {
+      // Ignore disconnect failures.
+    }
+  }
+
+  async connectRemote(profile, timeoutMs) {
+    const password = await this.getRemotePassword(profile);
+    if (!password) {
+      throw new Error("Remote RCON password is missing. Save credentials first.");
+    }
+
+    const connectPromise = Rcon.connect({
+      host: profile.host,
+      port: profile.rconPort,
+      password,
+    });
+
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Remote connection timed out.")), timeoutMs);
+    });
+
+    const rcon = await Promise.race([connectPromise, timeoutPromise]);
+    rcon.on("error", (error) => {
+      this.emit("log", `[RCON error] ${error.message || String(error)}`);
+    });
+    rcon.on("end", () => {
+      this.remoteConnected = false;
+      this.remoteRcon = null;
+      this.clearRemotePoll();
+      this.emit("status", {
+        running: false,
+        profile: this.currentProfile.id,
+      });
+    });
+    return rcon;
+  }
+
+  startRemotePoll() {
+    this.clearRemotePoll();
+    this.remotePollTimer = setInterval(() => {
+      if (!this.remoteRcon || !this.remoteConnected) {
+        return;
+      }
+      this.remoteRcon
+        .send("list")
+        .then((response) => {
+          this.emit("log", `[RCON] ${response}`);
+        })
+        .catch((error) => {
+          this.emit("log", `[RCON poll] ${error.message || String(error)}`);
+        });
+    }, 30 * 1000);
+  }
+
+  async runWakeCommand(profile) {
+    const command = String(profile.wakeCommand || "").trim();
+    if (!command) {
+      return;
+    }
+    this.emit("log", `Running wake command for ${profile.name}...`);
+    const child = spawn(command, [], {
+      cwd: this.baseRoot,
+      shell: true,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+  }
+
+  async remoteTestConnection(profileId = this.profileName) {
+    const profile = await this.resolveRemoteProfile(profileId);
+    if (!this.isRemoteProfile(profile)) {
+      throw new Error("Selected profile is not a remote server.");
+    }
+    const temp = await this.connectRemote(profile, profile.connectTimeoutSec * 1000);
+    try {
+      const response = await temp.send("list");
+      return {
+        ok: true,
+        response: String(response || "").trim(),
+      };
+    } finally {
+      try {
+        await temp.end();
+      } catch {
+        // Ignore disconnect failures.
+      }
+    }
+  }
+
+  async remoteStart(profileId = this.profileName) {
+    const profile = await this.resolveRemoteProfile(profileId);
+    if (!this.isRemoteProfile(profile)) {
+      throw new Error("Selected profile is not a remote server.");
+    }
+    if (this.remoteRcon && this.remoteConnected) {
+      return {
+        running: true,
+        profile: profile.id,
+        remote: true,
+        host: profile.host,
+        rconPort: profile.rconPort,
+      };
+    }
+
+    await this.runWakeCommand(profile);
+    const deadline = Date.now() + profile.wakeTimeoutSec * 1000;
+    let lastError = null;
+
+    while (Date.now() < deadline) {
+      try {
+        const client = await this.connectRemote(profile, profile.connectTimeoutSec * 1000);
+        await this.disconnectRemote();
+        this.remoteRcon = client;
+        this.remoteConnected = true;
+        this.startedAt = Date.now();
+        this.startRemotePoll();
+
+        this.emit("status", {
+          running: true,
+          profile: profile.id,
+          version: profile.version,
+          serverSoftware: profile.serverSoftware,
+          modePreset: profile.modePreset,
+          cheatLock: profile.cheatLock,
+          rulesLocked: profile.rulesLocked,
+          minMem: profile.minMem,
+          maxMem: profile.maxMem,
+          port: profile.port,
+          idleShutdownMinutes: profile.idleShutdownMinutes,
+          remote: true,
+          host: profile.host,
+          rconPort: profile.rconPort,
+        });
+
+        return {
+          running: true,
+          profile: profile.id,
+          remote: true,
+          host: profile.host,
+          rconPort: profile.rconPort,
+        };
+      } catch (error) {
+        lastError = error;
+        await this.wait(REMOTE_CONNECT_RETRY_MS);
+      }
+    }
+
+    throw new Error(
+      `Could not connect to remote RCON before timeout. ${lastError ? lastError.message : ""}`.trim(),
+    );
+  }
+
+  async remoteStop(profileId = this.profileName) {
+    const profile = await this.resolveRemoteProfile(profileId);
+    if (!this.isRemoteProfile(profile)) {
+      throw new Error("Selected profile is not a remote server.");
+    }
+    if (!this.remoteRcon || !this.remoteConnected) {
+      return { running: false };
+    }
+    try {
+      await this.remoteRcon.send("stop");
+    } catch (error) {
+      this.emit("log", `[RCON stop] ${error.message || String(error)}`);
+    }
+    await this.disconnectRemote();
+    this.emit("status", {
+      running: false,
+      profile: profile.id,
+      remote: true,
+      host: profile.host,
+      rconPort: profile.rconPort,
+    });
+    return { running: false };
+  }
+
+  async remoteCommand(cmd, profileId = this.profileName) {
+    const profile = await this.resolveRemoteProfile(profileId);
+    if (!this.isRemoteProfile(profile)) {
+      throw new Error("Selected profile is not a remote server.");
+    }
+    if (!this.remoteRcon || !this.remoteConnected) {
+      throw new Error("Remote server is not connected. Start or test connection first.");
+    }
+    const response = await this.remoteRcon.send(cmd);
+    const line = String(response || "").trim();
+    if (line) {
+      this.emit("log", `[RCON] ${line}`);
+    }
+    return line;
+  }
+
+  ensureUpnpClient() {
+    if (!this.upnpClient) {
+      this.upnpClient = natUpnp.createClient();
+    }
+    return this.upnpClient;
+  }
+
+  async getPublicIpAddress() {
+    try {
+      const payload = await this.fetchJson("https://api.ipify.org?format=json");
+      return String(payload.ip || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  getLocalIpv4Candidates() {
+    const interfaces = os.networkInterfaces();
+    const addresses = [];
+    for (const entries of Object.values(interfaces)) {
+      for (const entry of entries || []) {
+        if (!entry || entry.family !== "IPv4" || entry.internal) {
+          continue;
+        }
+        addresses.push(entry.address);
+      }
+    }
+    return addresses;
+  }
+
+  async checkTcpReachable(host, port, timeoutMs = 1500) {
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      const clean = (ok) => {
+        socket.destroy();
+        resolve(ok);
+      };
+      socket.setTimeout(timeoutMs);
+      socket.once("error", () => clean(false));
+      socket.once("timeout", () => clean(false));
+      socket.connect(port, host, () => clean(true));
+    });
+  }
+
+  async networkDiagnostics(profileId = this.profileName) {
+    const profile = await this.resolveRemoteProfile(profileId);
+    if (this.isRemoteProfile(profile)) {
+      const reachable = await this.checkTcpReachable(
+        profile.host,
+        profile.rconPort,
+        profile.connectTimeoutSec * 1000,
+      );
+      return {
+        mode: "remote",
+        host: profile.host,
+        rconPort: profile.rconPort,
+        reachable,
+        summary: reachable
+          ? "Remote RCON endpoint is reachable."
+          : "Remote RCON endpoint is not reachable from this machine.",
+      };
+    }
+
+    const profileDir = path.join(this.baseRoot, "profiles", profile.id);
+    const propertiesPath = path.join(profileDir, "server.properties");
+    const props = fs.existsSync(propertiesPath)
+      ? parseProperties(fs.readFileSync(propertiesPath, "utf8"))
+      : this.getDefaultProperties(profile);
+    const bindIp = String(props["server-ip"] || "").trim();
+    const port = Number.parseInt(String(props["server-port"] || profile.port || 25565), 10) || 25565;
+    const effectiveBind = bindIp || "0.0.0.0";
+    const localhostReachable = await this.checkTcpReachable("127.0.0.1", port);
+    const publicIp = await this.getPublicIpAddress();
+    const publicHost = String(profile.publicHost || "").trim();
+    const displayHost = publicHost || publicIp || "<public-ip>";
+    const needsPortForward = LOCALHOST_CANDIDATES.has(bindIp.toLowerCase());
+
+    return {
+      mode: "local",
+      bindIp: effectiveBind,
+      port,
+      localhostReachable,
+      publicIp,
+      publicHost,
+      publicEndpoint: `${displayHost}:${port}`,
+      needsPortForward,
+      localIps: this.getLocalIpv4Candidates(),
+      summary: localhostReachable
+        ? "Server port responds on localhost. Configure router/NAT for public access."
+        : "Server process is not listening on localhost yet. Start server and check bind/port.",
+    };
+  }
+
+  async upnpMap(profileId = this.profileName) {
+    const diagnostics = await this.networkDiagnostics(profileId);
+    if (diagnostics.mode !== "local") {
+      throw new Error("UPnP mapping is only available for local profiles.");
+    }
+    const client = this.ensureUpnpClient();
+    await new Promise((resolve, reject) => {
+      client.portMapping(
+        {
+          public: diagnostics.port,
+          private: diagnostics.port,
+          protocol: "TCP",
+          ttl: 60 * 60,
+          description: `${APP_NAME} ${profileId}`,
+        },
+        (error) => {
+          if (error) {
+            reject(new Error(`UPnP map failed: ${error.message || String(error)}`));
+            return;
+          }
+          resolve();
+        },
+      );
+    });
+    return {
+      mapped: true,
+      port: diagnostics.port,
+      endpoint: diagnostics.publicEndpoint,
+    };
+  }
+
+  async upnpUnmap(profileId = this.profileName) {
+    const diagnostics = await this.networkDiagnostics(profileId);
+    if (diagnostics.mode !== "local") {
+      throw new Error("UPnP mapping is only available for local profiles.");
+    }
+    const client = this.ensureUpnpClient();
+    await new Promise((resolve, reject) => {
+      client.portUnmapping(
+        { public: diagnostics.port, protocol: "TCP" },
+        (error) => {
+          if (error) {
+            reject(new Error(`UPnP unmap failed: ${error.message || String(error)}`));
+            return;
+          }
+          resolve();
+        },
+      );
+    });
+    return {
+      mapped: false,
+      port: diagnostics.port,
+    };
   }
 
   getBackupsDir(profileId = this.profileName) {
@@ -389,9 +1131,62 @@ class ServerManager extends EventEmitter {
   getBackupPolicy(profile = this.getActiveProfile()) {
     return {
       maxBackups: 4,
-      startInterval: profile.modePreset === "hardcore" ? 3 : 2,
-      wipeOnDeath: profile.modePreset === "hardcore",
+      maxAutoBackups: 2,
+      maxManualBackups: 2,
+      autoIntervalMs: AUTO_BACKUP_INTERVAL_MS,
+      // World deletion on death caused irreversible data loss and false positives.
+      // Hardcore now keeps the gameplay rules without destructive cleanup.
+      wipeOnDeath: false,
     };
+  }
+
+  isAutoBackupReason(reason = "") {
+    return String(reason || "").trim().toLowerCase().startsWith("auto-");
+  }
+
+  getProtectedBackupIds(backups = [], policy = this.getBackupPolicy()) {
+    const normalizedBackups = Array.isArray(backups) ? backups : [];
+    const maxBackups = Math.max(0, Number(policy.maxBackups) || 0);
+    const maxAutoBackups = Math.max(0, Number(policy.maxAutoBackups) || 0);
+    const maxManualBackups = Math.max(0, Number(policy.maxManualBackups) || 0);
+    const autoBackups = [];
+    const manualBackups = [];
+
+    for (const backup of normalizedBackups) {
+      if (this.isAutoBackupReason(backup.reason)) {
+        autoBackups.push(backup);
+        continue;
+      }
+      manualBackups.push(backup);
+    }
+
+    const protectedIds = new Set();
+    for (const backup of autoBackups.slice(0, maxAutoBackups)) {
+      protectedIds.add(backup.id);
+    }
+    for (const backup of manualBackups.slice(0, maxManualBackups)) {
+      protectedIds.add(backup.id);
+    }
+
+    if (protectedIds.size <= maxBackups) {
+      return protectedIds;
+    }
+
+    const trimmedProtectedIds = new Set();
+    for (const backup of normalizedBackups) {
+      if (!protectedIds.has(backup.id)) {
+        continue;
+      }
+      trimmedProtectedIds.add(backup.id);
+      if (trimmedProtectedIds.size >= maxBackups) {
+        break;
+      }
+    }
+    return trimmedProtectedIds;
+  }
+
+  getCurrentWorldName(profileDir = this.profileDir) {
+    return this.getConfiguredLevelName(profileDir);
   }
 
   hasMeaningfulProfileContent(profileDir = this.profileDir) {
@@ -429,7 +1224,7 @@ class ServerManager extends EventEmitter {
     }, 0);
   }
 
-  listBackups(profileId = this.profileName) {
+  listBackups(profileId = this.profileName, worldName = this.getCurrentWorldName()) {
     const backupRoot = this.getBackupsDir(profileId);
     if (!fs.existsSync(backupRoot)) {
       return [];
@@ -439,44 +1234,249 @@ class ServerManager extends EventEmitter {
       .readdirSync(backupRoot, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => {
+        const id = entry.name;
         const metadataPath = path.join(backupRoot, entry.name, "metadata.json");
         const metadata = safeJsonParse(
           fs.existsSync(metadataPath) ? fs.readFileSync(metadataPath, "utf8") : "{}",
         );
+        const parsedIdPrefix = Number.parseInt(String(id).split("-")[0], 10);
+        const idReason = String(id || "").replace(/^\d+-/, "").trim();
+        const metadataCreatedAt = Number(metadata && metadata.createdAt);
+        const metadataReason =
+          metadata && typeof metadata.reason === "string" ? metadata.reason.trim() : "";
+        const metadataSize = Number(metadata && metadata.sizeBytes);
         return {
-          id: entry.name,
-          createdAt: Number(metadata && metadata.createdAt) || 0,
-          reason: (metadata && metadata.reason) || "manual",
-          sizeBytes:
-            Number(metadata && metadata.sizeBytes) ||
-            this.getDirectorySize(path.join(backupRoot, entry.name, "data")),
+          id,
+          createdAt:
+            Number.isFinite(metadataCreatedAt) && metadataCreatedAt > 0
+              ? metadataCreatedAt
+              : Number.isFinite(parsedIdPrefix)
+                ? parsedIdPrefix
+                : 0,
+          reason: metadataReason || idReason || "manual",
+          worldName:
+            (metadata && metadata.worldName) ||
+            this.getConfiguredLevelName(path.join(backupRoot, entry.name, "data")),
+          sizeBytes: Number.isFinite(metadataSize) && metadataSize > 0 ? metadataSize : 0,
         };
       })
+      .filter((entry) => !worldName || entry.worldName === worldName)
       .sort((left, right) => right.createdAt - left.createdAt);
   }
 
-  pruneBackups(profileId = this.profileName, maxBackups = this.getBackupPolicy().maxBackups) {
-    if (maxBackups < 1) {
-      this.deleteBackups(profileId);
+  pruneBackups(
+    profileId = this.profileName,
+    maxBackups = this.getBackupPolicy().maxBackups,
+    worldName = null,
+    options = {},
+  ) {
+    const backupRoot = this.getBackupsDir(profileId);
+    const explicitProtectedIds = new Set(
+      Array.isArray(options.protectBackupIds)
+        ? options.protectBackupIds.map((backupId) => String(backupId || "").trim()).filter(Boolean)
+        : [],
+    );
+    const policy = this.getBackupPolicy();
+    const safeMaxBackups = Math.max(0, Number(maxBackups) || 0);
+
+    if (safeMaxBackups < 1 && explicitProtectedIds.size === 0) {
+      this.deleteBackups(profileId, worldName);
       return [];
     }
 
-    const backupRoot = this.getBackupsDir(profileId);
-    const backups = this.listBackups(profileId);
-    for (const backup of backups.slice(maxBackups)) {
+    const backups = this.listBackups(profileId, worldName);
+    const retentionPolicy = {
+      ...policy,
+      maxBackups: safeMaxBackups,
+      maxAutoBackups: Math.min(Math.max(0, Number(policy.maxAutoBackups) || 0), safeMaxBackups),
+      maxManualBackups: Math.min(Math.max(0, Number(policy.maxManualBackups) || 0), safeMaxBackups),
+    };
+    const protectedIds = this.getProtectedBackupIds(backups, retentionPolicy);
+    for (const backupId of explicitProtectedIds) {
+      protectedIds.add(backupId);
+    }
+
+    for (const backup of backups) {
+      if (protectedIds.has(backup.id)) {
+        continue;
+      }
       fs.rmSync(path.join(backupRoot, backup.id), { recursive: true, force: true });
     }
-    return this.listBackups(profileId);
+    return this.listBackups(profileId, worldName);
   }
 
-  deleteBackups(profileId = this.profileName) {
+  deleteBackups(profileId = this.profileName, worldName = null) {
     const backupRoot = this.getBackupsDir(profileId);
-    if (fs.existsSync(backupRoot)) {
+    if (!fs.existsSync(backupRoot)) {
+      return;
+    }
+
+    if (!worldName) {
       fs.rmSync(backupRoot, { recursive: true, force: true });
+      return;
+    }
+
+    for (const backup of this.listBackups(profileId, worldName)) {
+      fs.rmSync(path.join(backupRoot, backup.id), { recursive: true, force: true });
     }
   }
 
-  createBackup(reason = "manual") {
+  walkFiles(rootDir, visitor) {
+    if (!rootDir || !fs.existsSync(rootDir)) {
+      return;
+    }
+    const stack = [rootDir];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      const entries = fs.readdirSync(current, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(fullPath);
+          continue;
+        }
+        visitor(fullPath, entry);
+      }
+    }
+  }
+
+  getReferencedJarPaths() {
+    const referenced = new Set([path.resolve(this.jarPath)]);
+    for (const profile of readProfiles()) {
+      const software = profile.serverSoftware || DEFAULT_SERVER_SOFTWARE;
+      const version = profile.version || DEFAULT_MC_VERSION;
+      referenced.add(path.resolve(this.getJarPath(version, software)));
+    }
+    return referenced;
+  }
+
+  getStorageReport(profileId = this.profileName) {
+    const safeProfileId = String(profileId || this.profileName || "").trim() || this.profileName;
+    const profileDir = path.join(this.baseRoot, "profiles", safeProfileId);
+    const backupDir = this.getBackupsDir(safeProfileId);
+    const logsDir = path.join(profileDir, "logs");
+    const addonDirs = ["mods", "plugins"]
+      .map((folder) => path.join(profileDir, folder))
+      .filter((folderPath) => fs.existsSync(folderPath));
+    const addonBytes = addonDirs.reduce((total, folderPath) => total + this.getDirectorySize(folderPath), 0);
+    const backups = this.listBackups(safeProfileId, null);
+    const jarFiles = [];
+    this.walkFiles(this.jarCache, (filePath) => {
+      if (filePath.toLowerCase().endsWith(".jar")) {
+        jarFiles.push(filePath);
+      }
+    });
+
+    const jarsBytes = this.getDirectorySize(this.jarCache);
+    const backupsBytes = this.getDirectorySize(backupDir);
+    const logsBytes = this.getDirectorySize(logsDir);
+    const totalBytes = jarsBytes + backupsBytes + logsBytes + addonBytes;
+
+    return {
+      profileId: safeProfileId,
+      jarsBytes,
+      backupsBytes,
+      logsBytes,
+      addonsBytes: addonBytes,
+      totalBytes,
+      jarCount: jarFiles.length,
+      backupCount: backups.length,
+      addonCount: addonDirs.reduce((count, folderPath) => {
+        let nextCount = count;
+        this.walkFiles(folderPath, (filePath) => {
+          if (filePath.toLowerCase().endsWith(".jar")) {
+            nextCount += 1;
+          }
+        });
+        return nextCount;
+      }, 0),
+    };
+  }
+
+  cleanupStorage(profileId = this.profileName, options = {}) {
+    const safeProfileId = String(profileId || this.profileName || "").trim() || this.profileName;
+    const profileDir = path.join(this.baseRoot, "profiles", safeProfileId);
+    const logsDir = path.join(profileDir, "logs");
+    const backupDir = this.getBackupsDir(safeProfileId);
+    const now = Date.now();
+    const jarMaxAgeDays = Math.max(1, Number(options.jarMaxAgeDays) || JAR_CLEANUP_MAX_AGE_DAYS);
+    const backupMaxAgeDays = Math.max(1, Number(options.backupMaxAgeDays) || BACKUP_CLEANUP_MAX_AGE_DAYS);
+    const logMaxAgeDays = Math.max(1, Number(options.logMaxAgeDays) || LOG_CLEANUP_MAX_AGE_DAYS);
+    const jarAgeMs = jarMaxAgeDays * MILLIS_PER_DAY;
+    const backupAgeMs = backupMaxAgeDays * MILLIS_PER_DAY;
+    const logAgeMs = logMaxAgeDays * MILLIS_PER_DAY;
+    const backupPolicy = this.getBackupPolicy();
+
+    const removed = {
+      jars: 0,
+      backups: 0,
+      logs: 0,
+      bytes: 0,
+    };
+
+    const referencedJars = this.getReferencedJarPaths();
+    this.walkFiles(this.jarCache, (filePath) => {
+      if (!filePath.toLowerCase().endsWith(".jar")) {
+        return;
+      }
+      const resolvedPath = path.resolve(filePath);
+      if (referencedJars.has(resolvedPath)) {
+        return;
+      }
+      const stats = fs.statSync(filePath);
+      if (now - stats.mtimeMs < jarAgeMs) {
+        return;
+      }
+      fs.rmSync(filePath, { force: true });
+      removed.jars += 1;
+      removed.bytes += stats.size;
+    });
+
+    if (fs.existsSync(backupDir)) {
+      const allBackups = this.listBackups(safeProfileId, null);
+      const protectedBackups = this.getProtectedBackupIds(allBackups, backupPolicy);
+      for (const backup of allBackups) {
+        if (protectedBackups.has(backup.id)) {
+          continue;
+        }
+        if (now - Number(backup.createdAt || 0) < backupAgeMs) {
+          continue;
+        }
+        const backupPath = path.join(backupDir, backup.id);
+        const sizeBytes = this.getDirectorySize(backupPath);
+        fs.rmSync(backupPath, { recursive: true, force: true });
+        removed.backups += 1;
+        removed.bytes += sizeBytes;
+      }
+    }
+
+    this.walkFiles(logsDir, (filePath) => {
+      const stats = fs.statSync(filePath);
+      if (now - stats.mtimeMs < logAgeMs) {
+        return;
+      }
+      fs.rmSync(filePath, { force: true });
+      removed.logs += 1;
+      removed.bytes += stats.size;
+    });
+
+    this.clearAddonMetadataCache();
+    return {
+      profileId: safeProfileId,
+      removed,
+      policy: {
+        jarMaxAgeDays,
+        backupMaxAgeDays,
+        logMaxAgeDays,
+        maxBackups: backupPolicy.maxBackups,
+        maxAutoBackups: backupPolicy.maxAutoBackups,
+        maxManualBackups: backupPolicy.maxManualBackups,
+      },
+      report: this.getStorageReport(safeProfileId),
+    };
+  }
+
+  createBackup(reason = "manual", options = {}) {
     if (!this.hasMeaningfulProfileContent()) {
       return {
         id: "",
@@ -501,6 +1501,7 @@ class ServerManager extends EventEmitter {
       suffix += 1;
     }
     const backupDataDir = path.join(backupDir, "data");
+    const worldName = this.getCurrentWorldName();
 
     fs.mkdirSync(backupDataDir, { recursive: true });
     for (const entry of fs.readdirSync(this.profileDir, { withFileTypes: true })) {
@@ -514,11 +1515,159 @@ class ServerManager extends EventEmitter {
       id: backupId,
       createdAt,
       reason,
+      worldName,
       sizeBytes: this.getDirectorySize(backupDataDir),
     };
     fs.writeFileSync(path.join(backupDir, "metadata.json"), JSON.stringify(backupEntry, null, 2));
-    this.pruneBackups();
+    if (options.skipPrune !== true) {
+      this.pruneBackups(this.profileName, this.getBackupPolicy().maxBackups, null, {
+        protectBackupIds: Array.isArray(options.protectBackupIds) ? options.protectBackupIds : [],
+      });
+    }
     return backupEntry;
+  }
+
+  async flushWorldToDisk() {
+    if (!this.serverProcess || !this.serverProcess.stdin || this.serverProcess.killed) {
+      return;
+    }
+
+    try {
+      this.serverProcess.stdin.write("save-all flush\n");
+    } catch {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+
+  startAutoBackupLoop() {
+    this.stopAutoBackupLoop();
+    this.autoBackupTimer = setInterval(() => {
+      this.runAutoBackup().catch((error) => {
+        this.emit("log", `Auto backup failed: ${error.message || String(error)}`);
+      });
+    }, this.getBackupPolicy().autoIntervalMs);
+  }
+
+  stopAutoBackupLoop() {
+    if (this.autoBackupTimer) {
+      clearInterval(this.autoBackupTimer);
+      this.autoBackupTimer = null;
+    }
+  }
+
+  normalizeIdleShutdownMinutes(value = this.currentProfile.idleShutdownMinutes) {
+    const parsed = Number.parseInt(String(value ?? ""), 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return 0;
+    }
+    return Math.min(parsed, 1440);
+  }
+
+  updateIdlePresenceState(nextPlayerCount) {
+    const safeCount = Math.max(0, Number(nextPlayerCount) || 0);
+    this.lastKnownOnlinePlayers = safeCount;
+    if (safeCount > 0) {
+      this.idleSince = null;
+      return;
+    }
+    if (!this.idleSince) {
+      this.idleSince = Date.now();
+    }
+  }
+
+  requestPlayerSnapshot() {
+    if (!this.serverProcess || !this.serverProcess.stdin || this.serverProcess.killed) {
+      return;
+    }
+    try {
+      this.serverProcess.stdin.write("list\n");
+    } catch {
+      // Ignore write failures while server is shutting down.
+    }
+  }
+
+  evaluateIdleShutdown() {
+    if (
+      !this.serverProcess ||
+      this.idleShutdownMinutes < 1 ||
+      this.idleShutdownPending
+    ) {
+      return;
+    }
+
+    this.requestPlayerSnapshot();
+
+    if (this.lastKnownOnlinePlayers > 0) {
+      return;
+    }
+
+    if (!this.idleSince) {
+      this.idleSince = Date.now();
+    }
+
+    const idleLimitMs = this.idleShutdownMinutes * 60 * 1000;
+    const idleElapsedMs = Date.now() - this.idleSince;
+    if (idleElapsedMs < idleLimitMs) {
+      return;
+    }
+
+    this.idleShutdownPending = true;
+    this.emit(
+      "log",
+      `Idle shutdown triggered after ${this.idleShutdownMinutes} minute${this.idleShutdownMinutes === 1 ? "" : "s"} with no players online.`,
+    );
+    this.stop().catch((error) => {
+      this.idleShutdownPending = false;
+      this.emit("log", `Idle shutdown failed: ${error.message || String(error)}`);
+    });
+  }
+
+  startIdleShutdownLoop(minutes = this.currentProfile.idleShutdownMinutes) {
+    this.stopIdleShutdownLoop();
+    this.idleShutdownMinutes = this.normalizeIdleShutdownMinutes(minutes);
+    this.lastKnownOnlinePlayers = 0;
+    this.idleSince = this.idleShutdownMinutes > 0 ? Date.now() : null;
+
+    if (this.idleShutdownMinutes < 1) {
+      return;
+    }
+
+    this.emit(
+      "log",
+      `Idle shutdown enabled: stop server after ${this.idleShutdownMinutes} minute${this.idleShutdownMinutes === 1 ? "" : "s"} with no players online.`,
+    );
+
+    this.idleCheckTimer = setInterval(() => {
+      this.evaluateIdleShutdown();
+    }, IDLE_CHECK_INTERVAL_MS);
+
+    this.evaluateIdleShutdown();
+  }
+
+  stopIdleShutdownLoop() {
+    if (this.idleCheckTimer) {
+      clearInterval(this.idleCheckTimer);
+      this.idleCheckTimer = null;
+    }
+    this.idleShutdownPending = false;
+  }
+
+  async runAutoBackup() {
+    if (!this.serverProcess || this.autoBackupInProgress) {
+      return null;
+    }
+
+    this.autoBackupInProgress = true;
+    try {
+      await this.flushWorldToDisk();
+      const backup = this.createBackup("auto-5m");
+      this.emit("log", `Auto backup created: ${backup.id}`);
+      return backup;
+    } finally {
+      this.autoBackupInProgress = false;
+    }
   }
 
   async restoreBackup(backupId) {
@@ -535,7 +1684,7 @@ class ServerManager extends EventEmitter {
     }
 
     if (this.hasMeaningfulProfileContent()) {
-      this.createBackup("pre-restore");
+      this.createBackup("pre-restore", { protectBackupIds: [backupId] });
     }
 
     fs.mkdirSync(this.profileDir, { recursive: true });
@@ -545,12 +1694,17 @@ class ServerManager extends EventEmitter {
     for (const entry of fs.readdirSync(sourceDir)) {
       this.copyRecursive(path.join(sourceDir, entry), path.join(this.profileDir, entry));
     }
+    this.clearAddonMetadataCache();
 
     this.emit("status", {
       profile: this.currentProfile.id,
       version: this.currentProfile.version,
       serverSoftware: this.currentProfile.serverSoftware,
       rulesLocked: this.currentProfile.rulesLocked,
+      minMem: this.currentProfile.minMem,
+      maxMem: this.currentProfile.maxMem,
+      port: this.currentProfile.port,
+      idleShutdownMinutes: this.currentProfile.idleShutdownMinutes,
     });
 
     return this.listBackups();
@@ -562,6 +1716,24 @@ class ServerManager extends EventEmitter {
       return null;
     }
     return zip.readAsText(entry);
+  }
+
+  getAddonMetadataCacheKey(filePath, runtime, stats) {
+    if (!stats) {
+      return `${runtime}|${filePath}|missing`;
+    }
+    return `${runtime}|${filePath}|${stats.size}|${stats.mtimeMs}`;
+  }
+
+  getAddonMetadataCached(filePath, runtime, stats) {
+    const cacheKey = this.getAddonMetadataCacheKey(filePath, runtime, stats);
+    const cached = this.addonMetadataCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    const metadata = this.getAddonMetadata(filePath, runtime);
+    this.addonMetadataCache.set(cacheKey, metadata);
+    return metadata;
   }
 
   getAddonMetadata(filePath, runtime) {
@@ -591,6 +1763,7 @@ class ServerManager extends EventEmitter {
           id: metadata.id || path.basename(filePath, ".jar"),
           name: metadata.name || metadata.id || path.basename(filePath, ".jar"),
           version: metadata.version || "unknown",
+          description: metadata.description || "",
           environment: metadata.environment || "*",
           depends: metadata.depends || {},
         };
@@ -621,6 +1794,7 @@ class ServerManager extends EventEmitter {
         id: metadata.name || path.basename(filePath, ".jar"),
         name: metadata.name || path.basename(filePath, ".jar"),
         version: metadata.version || "unknown",
+        description: metadata.description || "",
         apiVersion: metadata["api-version"] || metadata.apiVersion || null,
         depends: Array.isArray(metadata.depend) ? metadata.depend : dependencyBlock,
       };
@@ -633,7 +1807,11 @@ class ServerManager extends EventEmitter {
     }
   }
 
-  buildCompatibilityReport(items, runtime = this.currentSoftware || DEFAULT_SERVER_SOFTWARE) {
+  buildCompatibilityReport(
+    items,
+    runtime = this.currentSoftware || DEFAULT_SERVER_SOFTWARE,
+    metadataByName = null,
+  ) {
     const findings = [];
     if (runtime === "vanilla") {
       return {
@@ -643,10 +1821,21 @@ class ServerManager extends EventEmitter {
       };
     }
 
+    const addonDir = this.getAddonDir(runtime);
     const metadataList = items
       .map((item) => {
-        const filePath = path.join(this.getAddonDir(runtime), item.name);
-        return this.getAddonMetadata(filePath, runtime);
+        if (metadataByName && metadataByName.has(item.name)) {
+          return metadataByName.get(item.name);
+        }
+        if (!addonDir) {
+          return null;
+        }
+        const filePath = path.join(addonDir, item.name);
+        if (!fs.existsSync(filePath)) {
+          return null;
+        }
+        const stats = fs.statSync(filePath);
+        return this.getAddonMetadataCached(filePath, runtime, stats);
       })
       .filter(Boolean);
 
@@ -881,17 +2070,9 @@ class ServerManager extends EventEmitter {
   registerServerStart(profile = this.getActiveProfile()) {
     const policy = this.getBackupPolicy(profile);
     const state = this.readProfileState();
-    state.startsSinceAutoBackup += 1;
-
-    let createdBackup = null;
-    if (this.hasMeaningfulProfileContent() && state.startsSinceAutoBackup >= policy.startInterval) {
-      createdBackup = this.createBackup(`auto-start-${policy.startInterval}`);
-      state.startsSinceAutoBackup = 0;
-    }
-
     this.writeProfileState(state);
     return {
-      createdBackup,
+      createdBackup: null,
       policy,
       state,
     };
@@ -923,6 +2104,12 @@ class ServerManager extends EventEmitter {
       payload.includes("Game over, man, it's game over")
     ) {
       return true;
+    }
+
+    // Ignore generic entity death log wrappers such as:
+    // "Villager ... died, message: 'Nitwit was slain by Player'"
+    if (payload.includes(" died, message: '")) {
+      return false;
     }
 
     return HARDCORE_DEATH_MARKERS.some((marker) => payload.includes(marker));
@@ -965,6 +2152,29 @@ class ServerManager extends EventEmitter {
     return true;
   }
 
+  updatePresenceFromLogLine(line) {
+    const rawLine = String(line || "").trim();
+    if (!rawLine) {
+      return;
+    }
+
+    const payload = rawLine.includes("]: ") ? rawLine.split("]: ").pop() || rawLine : rawLine;
+    const playerCountMatch = payload.match(PLAYER_COUNT_LOG_PATTERN);
+    if (playerCountMatch) {
+      this.updateIdlePresenceState(Number(playerCountMatch[1] || 0));
+      return;
+    }
+
+    if (payload.includes(" joined the game")) {
+      this.updateIdlePresenceState(Math.max(1, this.lastKnownOnlinePlayers));
+      return;
+    }
+
+    if (payload.includes(" left the game")) {
+      this.updateIdlePresenceState(Math.max(0, this.lastKnownOnlinePlayers - 1));
+    }
+  }
+
   handleServerOutput(chunk) {
     this.logBuffer += String(chunk || "");
     const lines = this.logBuffer.split(/\r?\n/);
@@ -976,6 +2186,7 @@ class ServerManager extends EventEmitter {
         continue;
       }
       this.emit("log", normalized);
+      this.updatePresenceFromLogLine(normalized);
       if (this.shouldWipeHardcoreWorldFromLog(normalized)) {
         this.queueHardcoreReset(normalized);
       }
@@ -986,15 +2197,21 @@ class ServerManager extends EventEmitter {
     const pending = this.logBuffer.replace(/\r$/, "").trim();
     this.logBuffer = "";
     if (!pending) {
+      this.flushLogBatch();
       return;
     }
     this.emit("log", pending);
+    this.updatePresenceFromLogLine(pending);
     if (this.shouldWipeHardcoreWorldFromLog(pending)) {
       this.queueHardcoreReset(pending);
     }
+    this.flushLogBatch();
   }
 
   syncWorldLockState() {
+    if (this.isRemoteProfile(this.currentProfile)) {
+      return;
+    }
     if (this.currentProfile && this.hasWorldData() && !this.currentProfile.rulesLocked) {
       const next = this.persistCurrentProfile({ rulesLocked: true });
       this.emit("status", {
@@ -1004,12 +2221,21 @@ class ServerManager extends EventEmitter {
         modePreset: next.modePreset,
         cheatLock: next.cheatLock,
         rulesLocked: next.rulesLocked,
+        minMem: next.minMem,
+        maxMem: next.maxMem,
+        port: next.port,
+        idleShutdownMinutes: next.idleShutdownMinutes,
       });
     }
   }
 
   setProfile(profile) {
     const resolved = this.resolveProfileInput(profile);
+    if (this.currentProfile.id !== resolved.id) {
+      this.disconnectRemote().catch(() => {
+        // Ignore remote disconnect failures while switching profile context.
+      });
+    }
     this.currentProfile = resolved;
     this.profileName = resolved.id || "default";
     this.currentVersion = resolved.version || DEFAULT_MC_VERSION;
@@ -1018,6 +2244,7 @@ class ServerManager extends EventEmitter {
     this.baseDir = this.profileDir;
     this.jarPath = this.getJarPath(this.currentVersion, this.currentSoftware);
     this.ensureBaseDir();
+    this.clearAddonMetadataCache();
     this.syncWorldLockState();
 
     const active = this.getActiveProfile();
@@ -1028,39 +2255,111 @@ class ServerManager extends EventEmitter {
       modePreset: active.modePreset,
       cheatLock: active.cheatLock,
       rulesLocked: active.rulesLocked,
+      minMem: active.minMem,
+      maxMem: active.maxMem,
+      port: active.port,
+      idleShutdownMinutes: active.idleShutdownMinutes,
+      profileType: active.profileType,
+      host: active.host,
+      rconPort: active.rconPort,
+      publicHost: active.publicHost,
     });
   }
 
-  deleteProfile(profileId) {
+  async deleteProfile(profileId) {
     if (!profileId) {
       throw new Error("Profile id is required");
     }
     if (this.serverProcess && this.profileName === profileId) {
       throw new Error("Stop the server before deleting it.");
     }
+    if (this.currentProfile.id === profileId) {
+      await this.disconnectRemote();
+    }
+    const targetProfile = readProfiles().find((profile) => profile.id === profileId);
+    if (targetProfile && targetProfile.rconPasswordRef) {
+      await this.clearRemotePassword(targetProfile);
+    }
     const profileDir = path.join(this.baseRoot, "profiles", profileId);
     if (fs.existsSync(profileDir)) {
       fs.rmSync(profileDir, { recursive: true, force: true });
     }
     this.deleteBackups(profileId);
+    this.clearAddonMetadataCache();
     return { deleted: true, id: profileId };
   }
 
   listAddons(software = this.currentSoftware || DEFAULT_SERVER_SOFTWARE) {
-    const context = this.getAddonContext(software);
-    const folderPath = this.getAddonDir(software);
-    if (!context.supported || !folderPath) {
+    if (this.isRemoteProfile()) {
       return {
         supported: false,
-        kind: context.kind,
-        label: context.label,
-        helperText: context.helperText,
+        kind: "none",
+        label: "Remote runtime add-ons unavailable",
+        helperText: "Remote profiles use RCON-only mode in this release. Use local profiles for add-on management.",
         folderPath: null,
-        runtime: context.runtime,
+        runtime: software,
         items: [],
         compatibility: {
           ready: true,
-          summary: context.helperText,
+          summary: "Remote profiles do not manage local mod/plugin files.",
+          findings: [],
+        },
+      };
+    }
+
+    const context = this.getAddonContext(software);
+    const folderPath = this.getAddonDir(software);
+    if (!context.supported || !folderPath) {
+      const detectedItems = [];
+      const legacyFolders = [
+        { folderName: "mods", label: "mods" },
+        { folderName: "plugins", label: "plugins" },
+      ];
+
+      for (const folder of legacyFolders) {
+        const scanDir = path.join(this.profileDir, folder.folderName);
+        if (!fs.existsSync(scanDir)) {
+          continue;
+        }
+        const entries = fs
+          .readdirSync(scanDir, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".jar"));
+        for (const entry of entries) {
+          const filePath = path.join(scanDir, entry.name);
+          const stats = fs.statSync(filePath);
+          detectedItems.push({
+            name: entry.name,
+            displayName: entry.name,
+            version: "unknown",
+            description: `Detected in ${folder.label} folder. Switch runtime to Fabric/Paper to load this jar.`,
+            valid: true,
+            sizeBytes: stats.size,
+            updatedAt: stats.mtimeMs,
+            projectId: "",
+            installedVersionId: "",
+            installedVersionNumber: "",
+            updateAvailable: false,
+          });
+        }
+      }
+
+      detectedItems.sort((left, right) => right.updatedAt - left.updatedAt);
+      const detectedKind = detectedItems.length > 0 ? "mods" : context.kind;
+      const detectedSummary =
+        detectedItems.length > 0
+          ? `${context.helperText} Detected ${detectedItems.length} add-on jar(s) in this profile.`
+          : context.helperText;
+      return {
+        supported: false,
+        kind: detectedKind,
+        label: context.label,
+        helperText: detectedSummary,
+        folderPath: null,
+        runtime: context.runtime,
+        items: detectedItems,
+        compatibility: {
+          ready: detectedItems.length === 0,
+          summary: detectedSummary,
           findings: [],
         },
       };
@@ -1069,6 +2368,9 @@ class ServerManager extends EventEmitter {
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
+    const manifest = this.readAddonManifest();
+    const entries = manifest.entries || {};
+    const metadataByName = new Map();
 
     const items = fs
       .readdirSync(folderPath, { withFileTypes: true })
@@ -1076,23 +2378,77 @@ class ServerManager extends EventEmitter {
       .map((entry) => {
         const filePath = path.join(folderPath, entry.name);
         const stats = fs.statSync(filePath);
+        const metadata = this.getAddonMetadataCached(filePath, software, stats);
+        metadataByName.set(entry.name, metadata);
+        const metadataSummary =
+          metadata && metadata.valid
+            ? String(metadata.description || "").trim()
+            : String((metadata && metadata.errors && metadata.errors[0]) || "").trim();
+        const catalog = entries[entry.name] || {};
+
         return {
           name: entry.name,
+          displayName:
+            metadata && metadata.valid
+              ? String(metadata.name || entry.name)
+              : entry.name,
+          version:
+            metadata && metadata.valid
+              ? String(metadata.version || "unknown")
+              : "unknown",
+          description: metadataSummary || "No metadata description available.",
+          valid: Boolean(metadata && metadata.valid),
           sizeBytes: stats.size,
           updatedAt: stats.mtimeMs,
+          projectId: catalog.projectId || "",
+          installedVersionId: catalog.installedVersionId || "",
+          installedVersionNumber: catalog.installedVersionNumber || "",
+          updateAvailable: false,
         };
       })
       .sort((left, right) => right.updatedAt - left.updatedAt);
+
+    const alternateFolderName = context.kind === "mods" ? "plugins" : "mods";
+    const alternateFolderPath = path.join(this.profileDir, alternateFolderName);
+    const alternateItems = [];
+    if (fs.existsSync(alternateFolderPath)) {
+      const altEntries = fs
+        .readdirSync(alternateFolderPath, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".jar"));
+      for (const entry of altEntries) {
+        const filePath = path.join(alternateFolderPath, entry.name);
+        const stats = fs.statSync(filePath);
+        alternateItems.push({
+          name: entry.name,
+          displayName: entry.name,
+          version: "unknown",
+          description: `Detected in ${alternateFolderName}/ while current runtime expects ${context.kind}/.`,
+          valid: true,
+          sizeBytes: stats.size,
+          updatedAt: stats.mtimeMs,
+          projectId: "",
+          installedVersionId: "",
+          installedVersionNumber: "",
+          updateAvailable: false,
+        });
+      }
+    }
+
+    const combinedItems = [...items, ...alternateItems].sort((left, right) => right.updatedAt - left.updatedAt);
+    const helperText =
+      alternateItems.length > 0
+        ? `${context.helperText} Also detected ${alternateItems.length} jar(s) in ${alternateFolderName}/.`
+        : context.helperText;
 
     return {
       supported: true,
       kind: context.kind,
       label: context.label,
-      helperText: context.helperText,
+      helperText,
       folderPath,
       runtime: context.runtime,
-      items,
-      compatibility: this.buildCompatibilityReport(items, software),
+      items: combinedItems,
+      compatibility: this.buildCompatibilityReport(items, software, metadataByName),
     };
   }
 
@@ -1119,7 +2475,9 @@ class ServerManager extends EventEmitter {
         continue;
       }
       fs.copyFileSync(sourcePath, path.join(folderPath, fileName));
+      this.clearAddonCatalogMetadata(fileName);
     }
+    this.clearAddonMetadataCache();
 
     return this.listAddons(software);
   }
@@ -1142,7 +2500,9 @@ class ServerManager extends EventEmitter {
         this.createBackup(`before-${context.kind}-change`);
       }
       fs.rmSync(filePath, { force: true });
+      this.clearAddonCatalogMetadata(safeName);
     }
+    this.clearAddonMetadataCache();
     return this.listAddons(software);
   }
 
@@ -1434,7 +2794,11 @@ class ServerManager extends EventEmitter {
     return [];
   }
 
-  async searchAddonCatalog(query, runtime = this.currentSoftware || DEFAULT_SERVER_SOFTWARE) {
+  async searchAddonCatalog(
+    query,
+    runtime = this.currentSoftware || DEFAULT_SERVER_SOFTWARE,
+    options = {},
+  ) {
     const context = this.getAddonContext(runtime);
     if (!context.supported) {
       return [];
@@ -1445,9 +2809,11 @@ class ServerManager extends EventEmitter {
       return [];
     }
 
+    const safeSort = CATALOG_SORT_INDEX.has(options.sort) ? options.sort : "relevance";
+    const limit = Math.min(24, Math.max(1, Number(options.limit) || 12));
     const searchUrl = `${MODRINTH_API_BASE}/search?query=${encodeURIComponent(
       searchQuery,
-    )}&limit=8&index=relevance&facets=${encodeURIComponent(
+    )}&limit=${limit}&index=${safeSort}&facets=${encodeURIComponent(
       JSON.stringify(this.getCatalogFacets(runtime)),
     )}`;
     const results = await this.fetchJson(searchUrl);
@@ -1458,9 +2824,63 @@ class ServerManager extends EventEmitter {
       author: hit.author,
       description: hit.description,
       downloads: hit.downloads,
+      follows: Number(hit.follows || hit.followers || 0),
       iconUrl: hit.icon_url || null,
       categories: hit.categories || [],
+      gallery: Array.isArray(hit.gallery) ? hit.gallery : [],
+      featuredGallery:
+        (Array.isArray(hit.gallery) && hit.gallery[0] && hit.gallery[0].url) ||
+        hit.featured_gallery ||
+        hit.icon_url ||
+        null,
+      dateModified: hit.date_modified || hit.date_created || null,
+      projectType: hit.project_type || context.kind.slice(0, -1),
     }));
+  }
+
+  async getCatalogProject(projectId) {
+    const safeProjectId = String(projectId || "").trim();
+    if (!safeProjectId) {
+      throw new Error("Project id is required.");
+    }
+    const detail = await this.fetchJson(`${MODRINTH_API_BASE}/project/${encodeURIComponent(safeProjectId)}`);
+    return {
+      projectId: String(detail.id || safeProjectId),
+      slug: String(detail.slug || ""),
+      title: String(detail.title || ""),
+      author: String(detail.team || detail.organization || "Unknown"),
+      description: String(detail.description || ""),
+      body: String(detail.body || ""),
+      downloads: Number(detail.downloads || 0),
+      follows: Number(detail.followers || detail.follows || 0),
+      iconUrl: detail.icon_url || null,
+      categories: Array.isArray(detail.categories) ? detail.categories : [],
+      gallery: Array.isArray(detail.gallery) ? detail.gallery : [],
+      featuredGallery:
+        (Array.isArray(detail.gallery) && detail.gallery[0] && detail.gallery[0].url) || detail.icon_url || null,
+      dateModified: detail.updated || detail.published || null,
+      projectType: detail.project_type || "mod",
+      clientSide: detail.client_side || "unknown",
+      serverSide: detail.server_side || "unknown",
+    };
+  }
+
+  async resolveCatalogVersion(projectId, runtime = this.currentSoftware || DEFAULT_SERVER_SOFTWARE) {
+    const loaders = this.getCatalogLoaders(runtime);
+    if (loaders.length === 0) {
+      return null;
+    }
+    const versionsUrl = `${MODRINTH_API_BASE}/project/${encodeURIComponent(
+      projectId,
+    )}/version?loaders=${encodeURIComponent(JSON.stringify(loaders))}&game_versions=${encodeURIComponent(
+      JSON.stringify([this.currentVersion]),
+    )}`;
+    const versions = await this.fetchJson(versionsUrl);
+    return (
+      (versions || []).find((version) => version.version_type === "release") ||
+      (versions || [])[0] ||
+      null
+    );
   }
 
   async installCatalogAddon(projectId, runtime = this.currentSoftware || DEFAULT_SERVER_SOFTWARE) {
@@ -1473,16 +2893,7 @@ class ServerManager extends EventEmitter {
       throw new Error("Project id is required.");
     }
 
-    const loaders = this.getCatalogLoaders(runtime);
-    const versionsUrl = `${MODRINTH_API_BASE}/project/${encodeURIComponent(
-      projectId,
-    )}/version?loaders=${encodeURIComponent(JSON.stringify(loaders))}&game_versions=${encodeURIComponent(
-      JSON.stringify([this.currentVersion]),
-    )}`;
-    const versions = await this.fetchJson(versionsUrl);
-    const selectedVersion =
-      (versions || []).find((version) => version.version_type === "release") ||
-      (versions || [])[0];
+    const selectedVersion = await this.resolveCatalogVersion(projectId, runtime);
     if (!selectedVersion) {
       throw new Error(`No compatible ${context.kind.slice(0, -1)} version found for ${this.currentVersion}.`);
     }
@@ -1498,7 +2909,54 @@ class ServerManager extends EventEmitter {
       this.createBackup(`before-${context.kind}-install`);
     }
     await this.downloadFile(file.url, path.join(folderPath, file.filename));
+    this.setAddonCatalogMetadata(file.filename, {
+      projectId,
+      installedVersionId: selectedVersion.id,
+      installedVersionNumber: selectedVersion.version_number,
+    });
+    this.clearAddonMetadataCache();
     return this.listAddons(runtime);
+  }
+
+  async checkAddonUpdates(runtime = this.currentSoftware || DEFAULT_SERVER_SOFTWARE) {
+    const state = this.listAddons(runtime);
+    if (!state.supported || !Array.isArray(state.items) || state.items.length === 0) {
+      return state;
+    }
+
+    const projects = [...new Set(state.items.map((item) => item.projectId).filter(Boolean))];
+    if (projects.length === 0) {
+      return state;
+    }
+
+    const latestByProject = new Map();
+    await Promise.all(
+      projects.map(async (projectId) => {
+        try {
+          const latest = await this.resolveCatalogVersion(projectId, runtime);
+          latestByProject.set(projectId, latest ? latest.id : "");
+        } catch {
+          latestByProject.set(projectId, "");
+        }
+      }),
+    );
+
+    return {
+      ...state,
+      items: state.items.map((item) => {
+        if (!item.projectId) {
+          return item;
+        }
+        const latestVersionId = latestByProject.get(item.projectId) || "";
+        if (!latestVersionId || !item.installedVersionId) {
+          return item;
+        }
+        return {
+          ...item,
+          updateAvailable: latestVersionId !== item.installedVersionId,
+        };
+      }),
+    };
   }
 
   async writeDefaultProperties(overrides = {}) {
@@ -1514,6 +2972,21 @@ class ServerManager extends EventEmitter {
   }
 
   async readProperties() {
+    const profile = this.getActiveProfile();
+    if (this.isRemoteProfile(profile)) {
+      return {
+        motd: profile.motd || DEFAULT_MOTD,
+        "server-port": String(profile.port || 25565),
+        "server-ip": "",
+        "max-players": "0",
+        "view-distance": "0",
+        "simulation-distance": "0",
+        "white-list": "false",
+        "enforce-whitelist": "false",
+        "online-mode": "true",
+      };
+    }
+
     if (!fs.existsSync(this.paths.properties)) {
       return this.writeDefaultProperties();
     }
@@ -1534,6 +3007,22 @@ class ServerManager extends EventEmitter {
 
   async writeProperties(updates) {
     const profile = this.getActiveProfile();
+    if (this.isRemoteProfile(profile)) {
+      const normalizedUpdates = this.normalizePropertyMap(updates);
+      const nextMotd = String(normalizedUpdates.motd || profile.motd || DEFAULT_MOTD).trim();
+      const nextPort =
+        Number.parseInt(String(normalizedUpdates["server-port"] || profile.port || 25565), 10) || 25565;
+      const persisted = this.persistCurrentProfile({
+        motd: nextMotd || DEFAULT_MOTD,
+        port: Math.min(65535, Math.max(1, nextPort)),
+      });
+      return {
+        motd: persisted.motd || DEFAULT_MOTD,
+        "server-port": String(persisted.port || 25565),
+        "server-ip": "",
+      };
+    }
+
     const props = await this.readProperties();
     const normalizedUpdates = this.normalizePropertyMap(updates);
     const merged = this.enforcePolicyProperties(
@@ -1558,6 +3047,10 @@ class ServerManager extends EventEmitter {
   }
 
   async start(options = {}) {
+    if (this.isRemoteProfile()) {
+      return this.remoteStart(this.profileName);
+    }
+
     if (!this.verifyJava()) {
       throw new Error("Java runtime not found in PATH. Install Java 17+ and retry.");
     }
@@ -1568,12 +3061,25 @@ class ServerManager extends EventEmitter {
     this.currentVersion = options.version || this.currentVersion || DEFAULT_MC_VERSION;
     this.currentSoftware =
       options.serverSoftware || this.currentSoftware || DEFAULT_SERVER_SOFTWARE;
+    const minMem = Math.max(1024, Number(options.minMem || this.currentProfile.minMem || 2048));
+    const maxMem = Math.max(minMem, Number(options.maxMem || this.currentProfile.maxMem || 4096));
+    const port = Math.min(
+      65535,
+      Math.max(1024, Number(options.port || this.currentProfile.port || 25565)),
+    );
+    const idleShutdownMinutes = this.normalizeIdleShutdownMinutes(
+      options.idleShutdownMinutes ?? this.currentProfile.idleShutdownMinutes,
+    );
     this.jarPath = this.getJarPath(this.currentVersion, this.currentSoftware);
     this.ensureBaseDir();
     this.persistCurrentProfile({
       version: this.currentVersion,
       serverSoftware: this.currentSoftware,
       motd: options.motd || this.currentProfile.motd || DEFAULT_MOTD,
+      minMem,
+      maxMem,
+      port,
+      idleShutdownMinutes,
     });
 
     this.registerServerStart();
@@ -1582,15 +3088,13 @@ class ServerManager extends EventEmitter {
     await this.acceptEula();
 
     const props = await this.writeProperties({
-      "server-port": String(options.port || 25565),
+      "server-port": String(port),
       motd: options.motd || this.currentProfile.motd || DEFAULT_MOTD,
       "max-players": String(options.maxPlayers || 8),
-      "view-distance": String(options.viewDistance || 12),
+      "view-distance": String(options.viewDistance || 20),
       "simulation-distance": String(options.simulationDistance || 10),
     });
 
-    const minMem = Math.max(1024, Number(options.minMem || 2048));
-    const maxMem = Math.max(minMem, Number(options.maxMem || 4096));
     const javaArgs = [`-Xms${minMem}M`, `-Xmx${maxMem}M`, "-jar", this.jarPath, "nogui"];
 
     this.serverProcess = spawn("java", javaArgs, {
@@ -1598,12 +3102,18 @@ class ServerManager extends EventEmitter {
       env: { ...process.env },
     });
     this.startedAt = Date.now();
+    this.startAutoBackupLoop();
+    this.startIdleShutdownLoop(idleShutdownMinutes);
 
     const lockedProfile = this.persistCurrentProfile({
       rulesLocked: true,
       version: this.currentVersion,
       serverSoftware: this.currentSoftware,
       motd: props.motd || this.currentProfile.motd || DEFAULT_MOTD,
+      minMem,
+      maxMem,
+      port: Number(props["server-port"] || port),
+      idleShutdownMinutes,
     });
 
     this.serverProcess.stdout.on("data", (data) => {
@@ -1615,6 +3125,9 @@ class ServerManager extends EventEmitter {
     this.serverProcess.on("close", (code) => {
       this.flushLogBuffer();
       this.emit("log", `Server exited with code ${code}`);
+      this.stopAutoBackupLoop();
+      this.stopIdleShutdownLoop();
+      this.autoBackupInProgress = false;
       this.serverProcess = null;
       this.applyPendingHardcoreReset();
       this.emit("status", {
@@ -1625,6 +3138,10 @@ class ServerManager extends EventEmitter {
         modePreset: lockedProfile.modePreset,
         cheatLock: lockedProfile.cheatLock,
         rulesLocked: lockedProfile.rulesLocked,
+        minMem: lockedProfile.minMem,
+        maxMem: lockedProfile.maxMem,
+        port: lockedProfile.port,
+        idleShutdownMinutes: lockedProfile.idleShutdownMinutes,
       });
     });
 
@@ -1638,6 +3155,10 @@ class ServerManager extends EventEmitter {
       modePreset: lockedProfile.modePreset,
       cheatLock: lockedProfile.cheatLock,
       rulesLocked: lockedProfile.rulesLocked,
+      minMem: lockedProfile.minMem,
+      maxMem: lockedProfile.maxMem,
+      port: lockedProfile.port,
+      idleShutdownMinutes: lockedProfile.idleShutdownMinutes,
     });
 
     return {
@@ -1649,11 +3170,22 @@ class ServerManager extends EventEmitter {
       modePreset: lockedProfile.modePreset,
       cheatLock: lockedProfile.cheatLock,
       rulesLocked: lockedProfile.rulesLocked,
+      minMem: lockedProfile.minMem,
+      maxMem: lockedProfile.maxMem,
+      port: lockedProfile.port,
+      idleShutdownMinutes: lockedProfile.idleShutdownMinutes,
     };
   }
 
   async stop() {
-    if (!this.serverProcess) return;
+    if (this.isRemoteProfile()) {
+      return this.remoteStop(this.profileName);
+    }
+    if (!this.serverProcess) {
+      return { running: false };
+    }
+    this.stopAutoBackupLoop();
+    this.stopIdleShutdownLoop();
     this.serverProcess.stdin.write("stop\n");
     const proc = this.serverProcess;
     return new Promise((resolve) => {
@@ -1676,6 +3208,10 @@ class ServerManager extends EventEmitter {
           modePreset: this.currentProfile.modePreset,
           cheatLock: this.currentProfile.cheatLock,
           rulesLocked: this.currentProfile.rulesLocked,
+          minMem: this.currentProfile.minMem,
+          maxMem: this.currentProfile.maxMem,
+          port: this.currentProfile.port,
+          idleShutdownMinutes: this.currentProfile.idleShutdownMinutes,
         });
         resolve();
       });
@@ -1691,22 +3227,44 @@ class ServerManager extends EventEmitter {
   }
 
   async sendCommand(cmd) {
-    if (!this.serverProcess) throw new Error("Server is not running");
     const profile = this.getActiveProfile();
     if (profile.cheatLock && !this.isCommandAllowed(cmd)) {
       throw new Error(`Cheat guard is on. Only safe admin commands are allowed from ${APP_NAME}.`);
     }
+
+    if (this.isRemoteProfile(profile)) {
+      await this.remoteCommand(cmd, profile.id);
+      return;
+    }
+
+    if (!this.serverProcess) throw new Error("Server is not running");
     this.serverProcess.stdin.write(`${cmd}\n`);
   }
 
   async getStats() {
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
     const systemUsage = {
       totalMB: Math.round(totalMem / 1024 / 1024),
       freeMB: Math.round(freeMem / 1024 / 1024),
-      usedMB: Math.round((totalMem - freeMem) / 1024 / 1024),
+      usedMB: Math.round(usedMem / 1024 / 1024),
+      usagePct: Number(((usedMem / totalMem) * 100).toFixed(1)),
     };
+    const profile = this.getActiveProfile();
+
+    if (this.isRemoteProfile(profile)) {
+      return {
+        running: Boolean(this.remoteConnected),
+        cpu: 0,
+        memoryMB: 0,
+        uptime: this.startedAt ? Math.round((Date.now() - this.startedAt) / 1000) : 0,
+        system: systemUsage,
+        remote: true,
+        configuredMinMB: profile.minMem,
+        configuredMaxMB: profile.maxMem,
+      };
+    }
 
     if (this.serverProcess) {
       const usage = await pidusage(this.serverProcess.pid);
@@ -1716,9 +3274,21 @@ class ServerManager extends EventEmitter {
         memoryMB: Math.round(usage.memory / 1024 / 1024),
         uptime: Math.round((Date.now() - this.startedAt) / 1000),
         system: systemUsage,
+        remote: false,
+        configuredMinMB: profile.minMem,
+        configuredMaxMB: profile.maxMem,
       };
     }
-    return { running: false, cpu: 0, memoryMB: 0, uptime: 0, system: systemUsage };
+    return {
+      running: false,
+      cpu: 0,
+      memoryMB: 0,
+      uptime: 0,
+      system: systemUsage,
+      remote: false,
+      configuredMinMB: profile.minMem,
+      configuredMaxMB: profile.maxMem,
+    };
   }
 }
 

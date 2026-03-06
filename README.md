@@ -2,9 +2,9 @@
 
 LMCD is a Windows desktop app for running and managing local Minecraft servers without living in Command Prompt.
 
-**Current release:** `1m26c1ea`
+**Current release:** `4m26s4ea`
 
-[Download the latest release](https://github.com/Veogner/LMCD/releases/tag/1m26c1ea)  |  [Read the release notes](docs/release-notes/1m26c1ea.md)  |  [Report a bug](https://github.com/Veogner/LMCD/issues/new/choose)
+[Download the latest release](https://github.com/Veogner/LMCD/releases/tag/4m26s4ea)  |  [Read the release notes](docs/release-notes/4m26s4ea.md)  |  [Report a bug](https://github.com/Veogner/LMCD/issues/new/choose)
 
 ![LMCD overview](docs/screenshots/lmcd-overview.png)
 
@@ -52,8 +52,8 @@ LMCD is a Windows desktop app for running and managing local Minecraft servers w
 
 Use the GitHub Releases page and download one of these top-level files:
 
-- `LMCD-1m26c1ea-Setup-x64.exe`
-- `LMCD-1m26c1ea-Portable-x64.exe`
+- `LMCD-4m26s4ea-Setup-x64.exe`
+- `LMCD-4m26s4ea-Portable-x64.exe`
 
 You do not need to open `win-unpacked` to use the app.
 
@@ -68,9 +68,9 @@ You do not need to open `win-unpacked` to use the app.
 
 ## Backup and hardcore behavior
 
-- Hardcore presets keep at most `4` backups and auto-save every `3` starts.
-- Non-hardcore presets keep at most `4` backups and auto-save every `2` starts.
-- Hardcore death detection can wipe the world and its backups after shutdown.
+- Backups are capped at `4` total per server (`2` auto + `2` manual/change snapshots).
+- Auto backups run every `5 minutes` while the server is online.
+- Destructive hardcore world/backup wipe on death is disabled.
 - Risky add-on changes still snapshot first so rollback stays available.
 
 ## Data location
@@ -81,7 +81,7 @@ If an older `Documents/TFSU-MiCr` folder exists, LMCD migrates it forward automa
 
 ## Release notes
 
-The current release notes are tracked in `docs/release-notes/1m26c1ea.md` and mirrored on the GitHub release page.
+The current release notes are tracked in `docs/release-notes/4m26s4ea.md` and mirrored on the GitHub release page.
 
 ## Issue reporting
 
